@@ -51,22 +51,23 @@ installer from the repository:
 .\scripts\Install-HeavyJobQueue.ps1
 ```
 
-This publishes the application to
-`%LOCALAPPDATA%\GitHubCopilot\HeavyJobQueue`, installs the replacement wrapper
-to `$HOME\.copilot\tools\Invoke-HeavyJob.ps1`, installs modular instructions at
+This publishes a framework-dependent application to
+`$HOME\.copilot\tools\HeavyJobQueue\HeavyJobQueue.exe`, installs the replacement wrapper at
+`$HOME\.copilot\tools\Invoke-HeavyJob.ps1`, installs modular instructions at
 `$HOME\.copilot\instructions\heavy-job-queue.instructions.md`, and launches the
 tray app. The installer does not edit or replace
 `$HOME\.copilot\copilot-instructions.md`.
 
-Startup is opt-in and only changed when requested:
+Running the explicit installer registers the tray app for per-user startup.
+Pass `-DisableStartup` to remove or skip that registration:
 
 ```powershell
-.\scripts\Install-HeavyJobQueue.ps1 -EnableStartup
 .\scripts\Install-HeavyJobQueue.ps1 -DisableStartup
 ```
 
 Use `-NoLaunch` to install without starting the application. The installer uses
-an isolated temporary publish directory and does not silently configure startup.
+an isolated temporary publish directory. `-EnableStartup` remains accepted for
+compatibility but is no longer required.
 Use `-SkipInstructions` if you only want the application and wrapper. Existing
 instructions at the managed path are updated only when they contain Heavy Job
 Queue's ownership marker; an unrelated file is never overwritten.
@@ -76,6 +77,11 @@ Copilot CLI loads modular user instructions from
 after installation, then use `/instructions` to confirm or disable the file.
 See GitHub's
 [custom instructions documentation](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-custom-instructions).
+
+WPF does not support trimming or Native AOT in .NET 10. The lightweight
+framework-dependent install reuses the installed .NET Desktop Runtime; publishing
+WPF as a bundled single file would add roughly 170 MB of native rendering
+libraries without reducing the app's steady-state runtime overhead.
 
 ## Use
 
@@ -139,7 +145,7 @@ transitions are rejected.
 ## Troubleshooting
 
 **Broker unavailable**: Start
-`%LOCALAPPDATA%\GitHubCopilot\HeavyJobQueue\HeavyJobQueue.exe` and retry.
+`$HOME\.copilot\tools\HeavyJobQueue\HeavyJobQueue.exe` and retry.
 
 **A job remains blocked by a legacy process**: Inspect
 `%LOCALAPPDATA%\GitHubCopilot\locks\heavy-job.owner.json`. The broker waits for

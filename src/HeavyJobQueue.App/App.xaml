@@ -2,5 +2,95 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <Application.Resources>
+        <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#F5F7FA" />
+        <SolidColorBrush x:Key="SurfaceBrush" Color="#FFFFFF" />
+        <SolidColorBrush x:Key="SurfaceAltBrush" Color="#F0F3F6" />
+        <SolidColorBrush x:Key="PrimaryTextBrush" Color="#17212B" />
+        <SolidColorBrush x:Key="SecondaryTextBrush" Color="#53626F" />
+        <SolidColorBrush x:Key="BorderBrush" Color="#9BAEB8" />
+        <SolidColorBrush x:Key="GridLineBrush" Color="#CDD7DC" />
+        <SolidColorBrush x:Key="HeaderBrush" Color="#E4EBEF" />
+        <SolidColorBrush x:Key="SelectionBrush" Color="#C9EAF5" />
+        <SolidColorBrush x:Key="ButtonBrush" Color="#E5EDF1" />
+        <SolidColorBrush x:Key="ButtonHoverBrush" Color="#D5E4EA" />
+        <SolidColorBrush x:Key="ButtonPressedBrush" Color="#C3D8E0" />
+        <SolidColorBrush x:Key="WarningButtonBrush" Color="#F6DCA8" />
+        <SolidColorBrush x:Key="ToolTipBrush" Color="#FFFFFF" />
+
+        <SolidColorBrush x:Key="MonitorBackgroundBrush" Color="#F7FAFC" />
+        <SolidColorBrush x:Key="MonitorGraphBrush" Color="#E8F7FA" />
+        <SolidColorBrush x:Key="MonitorGridBrush" Color="#B9DDE5" />
+        <SolidColorBrush x:Key="MonitorCpuBrush" Color="#0078A8" />
+        <SolidColorBrush x:Key="MonitorMemoryBrush" Color="#7A3FC1" />
+        <SolidColorBrush x:Key="MonitorPrimaryTextBrush" Color="#17212B" />
+        <SolidColorBrush x:Key="MonitorSecondaryTextBrush" Color="#53626F" />
+
+        <Style TargetType="Window">
+            <Setter Property="Background" Value="{DynamicResource WindowBackgroundBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource PrimaryTextBrush}" />
+        </Style>
+
+        <Style TargetType="GroupBox">
+            <Setter Property="Foreground" Value="{DynamicResource PrimaryTextBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+        </Style>
+
+        <Style TargetType="DataGrid">
+            <Setter Property="Background" Value="{DynamicResource SurfaceAltBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource PrimaryTextBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+            <Setter Property="HorizontalGridLinesBrush" Value="{DynamicResource GridLineBrush}" />
+            <Setter Property="VerticalGridLinesBrush" Value="{DynamicResource GridLineBrush}" />
+            <Setter Property="AlternationCount" Value="2" />
+            <Setter Property="RowBackground" Value="{DynamicResource SurfaceBrush}" />
+            <Setter Property="AlternatingRowBackground" Value="{DynamicResource SurfaceAltBrush}" />
+        </Style>
+
+        <Style TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="{DynamicResource HeaderBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource PrimaryTextBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+        </Style>
+
+        <Style TargetType="DataGridRow">
+            <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource PrimaryTextBrush}" />
+            <Style.Triggers>
+                <Trigger Property="AlternationIndex" Value="1">
+                    <Setter Property="Background" Value="{DynamicResource SurfaceAltBrush}" />
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource SelectionBrush}" />
+                    <Setter Property="Foreground" Value="{DynamicResource PrimaryTextBrush}" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style TargetType="DataGridCell">
+            <Setter Property="Foreground" Value="{DynamicResource PrimaryTextBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource GridLineBrush}" />
+        </Style>
+
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="{DynamicResource ButtonBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource PrimaryTextBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+            <Setter Property="Padding" Value="8,3" />
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource ButtonHoverBrush}" />
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource ButtonPressedBrush}" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style TargetType="ToolTip">
+            <Setter Property="Background" Value="{DynamicResource ToolTipBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource PrimaryTextBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+            <Setter Property="Padding" Value="8" />
+        </Style>
     </Application.Resources>
 </Application>

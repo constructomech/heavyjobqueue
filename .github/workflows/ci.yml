@@ -19,3 +19,11 @@ jobs:
       - run: dotnet restore HeavyJobQueue.sln
       - run: dotnet build HeavyJobQueue.sln --configuration Release --no-restore
       - run: dotnet test HeavyJobQueue.sln --configuration Release --no-build
+      - run: >-
+          dotnet publish src\HeavyJobQueue.App\HeavyJobQueue.App.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained false
+          -p:DebugType=None
+          -p:DebugSymbols=false
+          --output artifacts\publish

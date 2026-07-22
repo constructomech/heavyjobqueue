@@ -20,6 +20,7 @@ public partial class MainWindow : Window
         _coordinator = coordinator;
         InitializeComponent();
         Icon = TrayIconFactory.CreateImageSource();
+        SourceInitialized += (_, _) => ThemeManager.ApplyWindowChrome(this);
         ActiveGrid.ItemsSource = _activeRows;
         WaitingGrid.ItemsSource = _waitingRows;
 
@@ -40,6 +41,12 @@ public partial class MainWindow : Window
     }
 
     public bool IsExiting { get; set; }
+
+    public void RefreshTheme()
+    {
+        ThemeManager.ApplyWindowChrome(this);
+        PerformanceHistory.InvalidateVisual();
+    }
 
     public void ShowAndActivate()
     {

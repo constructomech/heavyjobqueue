@@ -2,8 +2,6 @@ using System.Globalization;
 using System.Windows;
 using System.Windows.Media;
 using Brush = System.Windows.Media.Brush;
-using Color = System.Windows.Media.Color;
-using ColorConverter = System.Windows.Media.ColorConverter;
 using FlowDirection = System.Windows.FlowDirection;
 using Pen = System.Windows.Media.Pen;
 using Point = System.Windows.Point;
@@ -17,14 +15,6 @@ internal sealed class PerformanceHistoryControl : FrameworkElement
     private const double HeaderHeight = 24;
     private const double MemoryHeight = 52;
     private const double Gap = 4;
-    private static readonly Brush BackgroundBrush = Brush("#101820");
-    private static readonly Brush GraphBackgroundBrush = Brush("#062C35");
-    private static readonly Brush PrimaryTextBrush = Brush("#F4F7FA");
-    private static readonly Brush SecondaryTextBrush = Brush("#A9BCC4");
-    private static readonly Pen BorderPen = Pen("#4A7781", 1);
-    private static readonly Pen GridPen = Pen("#174854", 0.5);
-    private static readonly Pen CpuPen = Pen("#35C5F0", 1);
-    private static readonly Pen MemoryPen = Pen("#B785F4", 1.5);
 
     private readonly List<Queue<double>> _processorHistory = [];
     private readonly Queue<double> _memoryHistory = new();
@@ -60,8 +50,17 @@ internal sealed class PerformanceHistoryControl : FrameworkElement
     protected override void OnRender(DrawingContext drawingContext)
     {
         base.OnRender(drawingContext);
+        var backgroundBrush = ResourceBrush("MonitorBackgroundBrush");
+        var graphBrush = ResourceBrush("MonitorGraphBrush");
+        var primaryTextBrush = ResourceBrush("MonitorPrimaryTextBrush");
+        var secondaryTextBrush = ResourceBrush("MonitorSecondaryTextBrush");
+        var borderPen = CreatePen(ResourceBrush("BorderBrush"), 1);
+        var gridPen = CreatePen(ResourceBrush("MonitorGridBrush"), 0.5);
+        var cpuPen = CreatePen(ResourceBrush("MonitorCpuBrush"), 1);
+        var memoryPen = CreatePen(ResourceBrush("MonitorMemoryBrush"), 1.5);
+
         drawingContext.DrawRectangle(
-            BackgroundBrush,
+            backgroundBrush,
             null,
             new Rect(0, 0, ActualWidth, ActualHeight));
 
@@ -72,7 +71,7 @@ internal sealed class PerformanceHistoryControl : FrameworkElement
                 $"System utilization unavailable: {_error}",
                 new Point(10, 10),
                 13,
-                PrimaryTextBrush);
+                primaryTextBrush);
             return;
         }
 
@@ -83,7 +82,7 @@ internal sealed class PerformanceHistoryControl : FrameworkElement
                 "Collecting system utilization...",
                 new Point(10, 10),
                 13,
-                SecondaryTextBrush);
+                secondaryTextBrush);
             return;
         }
 
@@ -94,15 +93,14 @@ internal sealed class PerformanceHistoryControl : FrameworkElement
             $"CPU  {average:P0}   {_processorHistory.Count} logical processors   60 seconds",
             new Point(8, 3),
             13,
-            PrimaryTextBrush);
+            primaryTextBrush);
 
         var cpuHeight = ActualHeight - HeaderHeight - MemoryHeight - (Gap * 2);
-        var columns = Math.Clamp(
-            (int)Math.Ceiling(Math.Sqrt(
-                _processorHistory.Count * ActualWidth / Math.Max(cpuHeight, 1))),
-            1,
-            _processorHistory.Count);
-        var rows = (int)Math.Ceiling((double)_processorHistory.Count / columns);
+        var maximumColumns = Math.Max(1, (int)(ActualWidth / 72));
+        var rows = (int)Math.Ceiling(
+            (double)_processorHistory.Count / maximumColumns);
+        var columns = (int)Math.Ceiling(
+            (double)_processorHistory.Count / rows);
         var cellWidth = (ActualWidth - ((columns + 1) * Gap)) / columns;
         var cellHeight = (cpuHeight - ((rows + 1) * Gap)) / rows;
 
@@ -115,13 +113,20 @@ internal sealed class PerformanceHistoryControl : FrameworkElement
                 HeaderHeight + Gap + (row * (cellHeight + Gap)),
                 cellWidth,
                 cellHeight);
-            DrawGraph(drawingContext, bounds, _processorHistory[index], CpuPen);
+            DrawGraph(
+                drawingContext,
+                bounds,
+                _processorHistory[index],
+                cpuPen,
+                graphBrush,
+                borderPen,
+                gridPen);
             DrawText(
                 drawingContext,
                 index.ToString(CultureInfo.InvariantCulture),
                 new Point(bounds.X + 3, bounds.Y + 1),
                 8,
-                SecondaryTextBrush);
+                secondaryTextBrush);
         }
 
         var memoryBounds = new Rect(
@@ -129,34 +134,44 @@ internal sealed class PerformanceHistoryControl : FrameworkElement
             ActualHeight - MemoryHeight,
             ActualWidth - (Gap * 2),
             MemoryHeight - Gap);
-        DrawGraph(drawingContext, memoryBounds, _memoryHistory, MemoryPen);
+        DrawGraph(
+            drawingContext,
+            memoryBounds,
+            _memoryHistory,
+            memoryPen,
+            graphBrush,
+            borderPen,
+            gridPen);
         DrawText(
             drawingContext,
             $"Memory  {FormatBytes(_usedMemory)} / {FormatBytes(_totalMemory)}" +
             $"  ({(_totalMemory == 0 ? 0 : (double)_usedMemory / _totalMemory):P0})",
             new Point(memoryBounds.X + 6, memoryBounds.Y + 3),
             11,
-            PrimaryTextBrush);
+            primaryTextBrush);
     }
 
     private static void DrawGraph(
         DrawingContext drawingContext,
         Rect bounds,
         IReadOnlyCollection<double> history,
-        Pen linePen)
+        Pen linePen,
+        Brush graphBrush,
+        Pen borderPen,
+        Pen gridPen)
     {
-        drawingContext.DrawRectangle(GraphBackgroundBrush, BorderPen, bounds);
+        drawingContext.DrawRectangle(graphBrush, borderPen, bounds);
 
         for (var index = 1; index < 4; index++)
         {
             var x = bounds.X + (bounds.Width * index / 4);
             var y = bounds.Y + (bounds.Height * index / 4);
             drawingContext.DrawLine(
-                GridPen,
+                gridPen,
                 new Point(x, bounds.Y),
                 new Point(x, bounds.Bottom));
             drawingContext.DrawLine(
-                GridPen,
+                gridPen,
                 new Point(bounds.X, y),
                 new Point(bounds.Right, y));
         }
@@ -238,17 +253,12 @@ internal sealed class PerformanceHistoryControl : FrameworkElement
     private static string FormatBytes(ulong bytes) =>
         $"{bytes / 1024d / 1024d / 1024d:0.0} GB";
 
-    private static SolidColorBrush Brush(string color)
-    {
-        var brush = new SolidColorBrush(
-            (Color)ColorConverter.ConvertFromString(color));
-        brush.Freeze();
-        return brush;
-    }
+    private Brush ResourceBrush(string key) =>
+        (Brush)FindResource(key);
 
-    private static Pen Pen(string color, double thickness)
+    private static Pen CreatePen(Brush brush, double thickness)
     {
-        var pen = new Pen(Brush(color), thickness);
+        var pen = new Pen(brush, thickness);
         pen.Freeze();
         return pen;
     }

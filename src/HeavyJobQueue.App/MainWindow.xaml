@@ -4,9 +4,9 @@
         xmlns:local="clr-namespace:HeavyJobQueue.App"
         Title="Heavy Job Queue"
         Height="800"
-        Width="1040"
+        Width="1280"
         MinHeight="650"
-        MinWidth="800"
+        MinWidth="900"
         WindowStartupLocation="CenterScreen">
     <Grid Margin="20">
         <Grid.RowDefinitions>
@@ -20,7 +20,7 @@
         <StackPanel>
             <TextBlock FontSize="24" FontWeight="SemiBold" Text="Heavy Job Queue" />
             <TextBlock Margin="0,4,0,0"
-                       Foreground="#666"
+                       Foreground="{DynamicResource SecondaryTextBrush}"
                        Text="Heavy jobs run one at a time unless you explicitly approve an override." />
         </StackPanel>
 
@@ -39,7 +39,8 @@
                       ToolTipService.InitialShowDelay="300"
                       ToolTipService.ShowDuration="60000">
                 <DataGrid.RowStyle>
-                    <Style TargetType="DataGridRow">
+                    <Style TargetType="DataGridRow"
+                           BasedOn="{StaticResource {x:Type DataGridRow}}">
                         <Setter Property="ToolTip" Value="{Binding Command}" />
                     </Style>
                 </DataGrid.RowStyle>
@@ -70,7 +71,8 @@
                       ToolTipService.InitialShowDelay="300"
                       ToolTipService.ShowDuration="60000">
                 <DataGrid.RowStyle>
-                    <Style TargetType="DataGridRow">
+                    <Style TargetType="DataGridRow"
+                           BasedOn="{StaticResource {x:Type DataGridRow}}">
                         <Setter Property="ToolTip" Value="{Binding Command}" />
                     </Style>
                 </DataGrid.RowStyle>
@@ -87,12 +89,12 @@
 
         <DockPanel Grid.Row="4" Margin="0,14,0,0">
             <TextBlock VerticalAlignment="Center"
-                       Foreground="#666"
+                       Foreground="{DynamicResource SecondaryTextBrush}"
                        Text="Closing this window keeps the broker running in the tray." />
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
                 <Button Width="90"
                         Margin="8,0,0,0"
-                        Background="#FFFFE0B2"
+                        Background="{DynamicResource WarningButtonBrush}"
                         Click="RunNow_Click"
                         Content="Run now" />
                 <Button Width="110"

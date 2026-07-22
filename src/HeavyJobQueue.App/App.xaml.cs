@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Threading;
 using HeavyJobQueue.Core;
+using Microsoft.Win32;
 using Forms = System.Windows.Forms;
 
 namespace HeavyJobQueue.App;
@@ -18,6 +19,7 @@ public partial class App : System.Windows.Application
     {
         base.OnStartup(eventArgs);
         ShutdownMode = System.Windows.ShutdownMode.OnExplicitShutdown;
+        ThemeManager.Apply(this);
 
         _instanceMutex = new Mutex(initiallyOwned: true, MutexName, out var createdNew);
         if (!createdNew)
@@ -32,6 +34,8 @@ public partial class App : System.Windows.Application
             Shutdown();
             return;
         }
+
+        SystemEvents.UserPreferenceChanged += SystemThemeChanged;
 
         var coordinator = new QueueCoordinator();
         _broker = new QueueBroker(coordinator, new LegacyLock());
@@ -58,6 +62,8 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(System.Windows.ExitEventArgs eventArgs)
     {
+        SystemEvents.UserPreferenceChanged -= SystemThemeChanged;
+
         if (_trayIcon is not null)
         {
             _trayIcon.Visible = false;
@@ -98,5 +104,21 @@ public partial class App : System.Windows.Application
         }
 
         Shutdown();
+    }
+
+    private void SystemThemeChanged(
+        object sender,
+        UserPreferenceChangedEventArgs eventArgs)
+    {
+        if (Dispatcher.HasShutdownStarted)
+        {
+            return;
+        }
+
+        Dispatcher.BeginInvoke(() =>
+        {
+            ThemeManager.Apply(this);
+            _window?.RefreshTheme();
+        });
     }
 }

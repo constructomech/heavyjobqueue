@@ -5,11 +5,12 @@ applyTo: "**"
 
 # Shared heavy jobs
 
-Compilation, CMake configuration, and benchmarking are shared heavy jobs and
-must be serialized across all local Copilot sessions on this machine.
+Compilation, CMake configuration, test execution, and benchmarking are shared
+heavy jobs and must be serialized across all local Copilot sessions on this
+machine.
 
-Never run a compilation, CMake configure, or benchmark command directly. Run
-each heavy command through the queue wrapper:
+Never run a compilation, CMake configure, test, or benchmark command directly.
+Run each heavy command through the queue wrapper:
 
 ```powershell
 & "$HOME\.copilot\tools\Invoke-HeavyJob.ps1" "<short job description>" { <command> }

@@ -67,6 +67,7 @@ public static class Protocol
         var label = GetRequiredString(root, "label");
         var callerPid = GetRequiredInt32(root, "callerPid");
         var cwd = GetRequiredString(root, "cwd");
+        var command = GetOptionalString(root, "command");
         var enqueuedAtText = GetRequiredString(root, "enqueuedAt");
         var waitTimeoutSeconds = GetRequiredInt32(root, "waitTimeoutSeconds");
 
@@ -83,6 +84,11 @@ public static class Protocol
         if (cwd.Length > 32_767)
         {
             throw new ProtocolException("invalid_cwd", "cwd is too long.");
+        }
+
+        if (command?.Length > 32_767)
+        {
+            throw new ProtocolException("invalid_command", "command is too long.");
         }
 
         if (!DateTimeOffset.TryParse(
@@ -110,6 +116,7 @@ public static class Protocol
             cwd,
             enqueuedAt,
             TimeSpan.FromSeconds(waitTimeoutSeconds),
+            command,
             null,
             null,
             null);
@@ -131,6 +138,7 @@ public static class Protocol
             null,
             null,
             null,
+            null,
             succeeded,
             exitCode,
             error);
@@ -141,6 +149,7 @@ public static class Protocol
             version,
             type,
             GetRequiredGuid(root, "requestId"),
+            null,
             null,
             null,
             null,
@@ -232,6 +241,7 @@ public sealed record ClientMessage(
     string? Cwd,
     DateTimeOffset? EnqueuedAt,
     TimeSpan? WaitTimeout,
+    string? Command,
     bool? Succeeded,
     int? ExitCode,
     string? Error);

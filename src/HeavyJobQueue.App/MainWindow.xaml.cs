@@ -14,6 +14,7 @@ public partial class MainWindow : Window
     {
         _coordinator = coordinator;
         InitializeComponent();
+        Icon = TrayIconFactory.CreateImageSource();
 
         _coordinator.Changed += QueueChanged;
         _timer = new DispatcherTimer(TimeSpan.FromSeconds(1), DispatcherPriority.Background, (_, _) => Refresh(), Dispatcher);
@@ -67,6 +68,47 @@ public partial class MainWindow : Window
         }
     }
 
+    private void RunNow_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        if (WaitingGrid.SelectedItem is not WaitingRow row)
+        {
+            return;
+        }
+
+        var result = System.Windows.MessageBox.Show(
+            $"Run '{row.Label}' immediately?\n\n" +
+            "This may run it concurrently with active or legacy jobs. " +
+            "Automatic queue grants will remain blocked until every active job finishes.",
+            "Approve concurrent heavy job",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (result == MessageBoxResult.Yes)
+        {
+            _coordinator.RunNow(row.RequestId);
+        }
+    }
+
+    private void PauseResume_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        if (WaitingGrid.SelectedItem is not WaitingRow row)
+        {
+            return;
+        }
+
+        if (row.IsPaused)
+        {
+            _coordinator.Resume(row.RequestId);
+        }
+        else
+        {
+            _coordinator.Pause(row.RequestId);
+        }
+
+        Select(row.RequestId);
+    }
+
     private void QueueChanged(object? sender, EventArgs eventArgs) =>
         Dispatcher.BeginInvoke(Refresh);
 
@@ -75,30 +117,28 @@ public partial class MainWindow : Window
         var state = _coordinator.Snapshot();
         var now = DateTimeOffset.UtcNow;
 
-        if (state.Active is null)
-        {
-            ActiveLabel.Text = "No active job";
-            ActivePid.Text = string.Empty;
-            ActiveCwd.Text = string.Empty;
-            ActiveElapsed.Text = string.Empty;
-        }
-        else
-        {
-            ActiveLabel.Text = state.Active.Label;
-            ActivePid.Text = $"PID {state.Active.CallerPid}";
-            ActiveCwd.Text = state.Active.Cwd;
-            ActiveElapsed.Text = FormatElapsed(now - state.Active.ActivatedAt!.Value);
-        }
+        ActiveGrid.ItemsSource = state.ActiveJobs
+            .Select(job => new ActiveRow(
+                job.IsManualOverride ? "Override" : "Automatic",
+                job.Label,
+                job.CallerPid,
+                job.Cwd,
+                FormatElapsed(now - job.ActivatedAt!.Value),
+                job.Command ?? "Command was not provided by this client."))
+            .ToArray();
 
         var selectedId = (WaitingGrid.SelectedItem as WaitingRow)?.RequestId;
         WaitingGrid.ItemsSource = state.Waiting
             .Select((job, index) => new WaitingRow(
                 job.RequestId,
                 index + 1,
+                job.Status == JobStatus.Paused ? "Paused" : "Waiting",
                 job.Label,
                 job.CallerPid,
                 job.Cwd,
-                FormatElapsed(now - job.EnqueuedAt)))
+                FormatElapsed(now - job.EnqueuedAt),
+                job.Status == JobStatus.Paused,
+                job.Command ?? "Command was not provided by this client."))
             .ToArray();
 
         if (selectedId is not null)
@@ -129,8 +169,19 @@ public partial class MainWindow : Window
     private sealed record WaitingRow(
         Guid RequestId,
         int Position,
+        string Status,
         string Label,
         int Pid,
         string Cwd,
-        string Elapsed);
+        string Elapsed,
+        bool IsPaused,
+        string Command);
+
+    private sealed record ActiveRow(
+        string Mode,
+        string Label,
+        int Pid,
+        string Cwd,
+        string Elapsed,
+        string Command);
 }

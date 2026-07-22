@@ -19,34 +19,33 @@
             <TextBlock FontSize="24" FontWeight="SemiBold" Text="Heavy Job Queue" />
             <TextBlock Margin="0,4,0,0"
                        Foreground="#666"
-                       Text="Compilation, CMake, and benchmark jobs run one at a time." />
+                       Text="Heavy jobs run one at a time unless you explicitly approve an override." />
         </StackPanel>
 
-        <GroupBox Grid.Row="1" Margin="0,20,0,16" Header="Active job">
-            <Grid Margin="10">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="2*" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="3*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBlock x:Name="ActiveLabel"
-                           FontWeight="SemiBold"
-                           Text="No active job"
-                           TextTrimming="CharacterEllipsis" />
-                <TextBlock x:Name="ActivePid"
-                           Grid.Column="1"
-                           Margin="20,0"
-                           Foreground="#555" />
-                <TextBlock x:Name="ActiveCwd"
-                           Grid.Column="2"
-                           Foreground="#555"
-                           TextTrimming="CharacterEllipsis"
-                           ToolTip="{Binding RelativeSource={RelativeSource Self}, Path=Text}" />
-                <TextBlock x:Name="ActiveElapsed"
-                           Grid.Column="3"
-                           Margin="20,0,0,0" />
-            </Grid>
+        <GroupBox Grid.Row="1" Margin="0,20,0,16" Header="Active jobs">
+            <DataGrid x:Name="ActiveGrid"
+                      Margin="10"
+                      MinHeight="58"
+                      MaxHeight="150"
+                      AutoGenerateColumns="False"
+                      CanUserAddRows="False"
+                      CanUserDeleteRows="False"
+                      CanUserReorderColumns="False"
+                      IsReadOnly="True"
+                      SelectionMode="Single">
+                <DataGrid.RowStyle>
+                    <Style TargetType="DataGridRow">
+                        <Setter Property="ToolTip" Value="{Binding Command}" />
+                    </Style>
+                </DataGrid.RowStyle>
+                <DataGrid.Columns>
+                    <DataGridTextColumn Width="110" Binding="{Binding Mode}" Header="Mode" />
+                    <DataGridTextColumn Width="2*" Binding="{Binding Label}" Header="Label" />
+                    <DataGridTextColumn Width="80" Binding="{Binding Pid}" Header="PID" />
+                    <DataGridTextColumn Width="3*" Binding="{Binding Cwd}" Header="Working directory" />
+                    <DataGridTextColumn Width="100" Binding="{Binding Elapsed}" Header="Running" />
+                </DataGrid.Columns>
+            </DataGrid>
         </GroupBox>
 
         <GroupBox Grid.Row="2" Header="Waiting jobs">
@@ -58,8 +57,14 @@
                       CanUserReorderColumns="False"
                       IsReadOnly="True"
                       SelectionMode="Single">
+                <DataGrid.RowStyle>
+                    <Style TargetType="DataGridRow">
+                        <Setter Property="ToolTip" Value="{Binding Command}" />
+                    </Style>
+                </DataGrid.RowStyle>
                 <DataGrid.Columns>
                     <DataGridTextColumn Width="44" Binding="{Binding Position}" Header="#" />
+                    <DataGridTextColumn Width="80" Binding="{Binding Status}" Header="Status" />
                     <DataGridTextColumn Width="2*" Binding="{Binding Label}" Header="Label" />
                     <DataGridTextColumn Width="80" Binding="{Binding Pid}" Header="PID" />
                     <DataGridTextColumn Width="3*" Binding="{Binding Cwd}" Header="Working directory" />
@@ -73,6 +78,15 @@
                        Foreground="#666"
                        Text="Closing this window keeps the broker running in the tray." />
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button Width="90"
+                        Margin="8,0,0,0"
+                        Background="#FFFFE0B2"
+                        Click="RunNow_Click"
+                        Content="Run now" />
+                <Button Width="110"
+                        Margin="8,0,0,0"
+                        Click="PauseResume_Click"
+                        Content="Pause / resume" />
                 <Button Width="90" Margin="8,0,0,0" Click="MoveUp_Click" Content="Move up" />
                 <Button Width="90" Margin="8,0,0,0" Click="MoveDown_Click" Content="Move down" />
             </StackPanel>

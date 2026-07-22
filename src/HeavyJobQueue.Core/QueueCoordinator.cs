@@ -1,10 +1,14 @@
 namespace HeavyJobQueue.Core;
 
+using System.Threading.Channels;
+
 public sealed class QueueCoordinator
 {
     private readonly object _gate = new();
     private readonly List<QueueRegistration> _waiting = [];
-    private QueueRegistration? _active;
+    private readonly List<QueueRegistration> _paused = [];
+    private readonly List<QueueRegistration> _active = [];
+    private CancellationTokenSource _activePeriodEnded = CreateCanceledTokenSource();
 
     public event EventHandler? Changed;
 
@@ -13,8 +17,9 @@ public sealed class QueueCoordinator
         QueueRegistration registration;
         lock (_gate)
         {
-            if ((_active?.Request.RequestId == request.RequestId) ||
-                _waiting.Any(item => item.Request.RequestId == request.RequestId))
+            if (_active.Any(item => item.Request.RequestId == request.RequestId) ||
+                _waiting.Any(item => item.Request.RequestId == request.RequestId) ||
+                _paused.Any(item => item.Request.RequestId == request.RequestId))
             {
                 throw new InvalidOperationException($"Request '{request.RequestId}' is already queued.");
             }
@@ -31,7 +36,7 @@ public sealed class QueueCoordinator
     {
         lock (_gate)
         {
-            return _active is null && _waiting.Count > 0 ? _waiting[0] : null;
+            return _active.Count == 0 && _waiting.Count > 0 ? _waiting[0] : null;
         }
     }
 
@@ -40,7 +45,7 @@ public sealed class QueueCoordinator
         QueueRegistration? registration = null;
         lock (_gate)
         {
-            if (_active is not null ||
+            if (_active.Count > 0 ||
                 _waiting.Count == 0 ||
                 _waiting[0].Request.RequestId != requestId)
             {
@@ -49,11 +54,94 @@ public sealed class QueueCoordinator
 
             registration = _waiting[0];
             _waiting.RemoveAt(0);
+            BeginActivePeriod();
             registration.ActivatedAt = DateTimeOffset.UtcNow;
-            _active = registration;
+            _active.Add(registration);
         }
 
         registration.MarkGranted();
+        OnChanged();
+        return true;
+    }
+
+    public bool RunNow(Guid requestId)
+    {
+        QueueRegistration? registration = null;
+        lock (_gate)
+        {
+            var index = _waiting.FindIndex(item => item.Request.RequestId == requestId);
+            if (index >= 0)
+            {
+                registration = _waiting[index];
+                _waiting.RemoveAt(index);
+            }
+            else
+            {
+                index = _paused.FindIndex(item => item.Request.RequestId == requestId);
+                if (index < 0)
+                {
+                    return false;
+                }
+
+                registration = _paused[index];
+                _paused.RemoveAt(index);
+            }
+
+            BeginActivePeriod();
+            registration.ActivatedAt = DateTimeOffset.UtcNow;
+            registration.IsPaused = false;
+            registration.IsManualOverride = true;
+            registration.CancelScheduling();
+            _active.Add(registration);
+        }
+
+        registration.MarkGranted();
+        OnChanged();
+        return true;
+    }
+
+    public bool Pause(Guid requestId)
+    {
+        QueueRegistration registration;
+        lock (_gate)
+        {
+            var index = _waiting.FindIndex(item => item.Request.RequestId == requestId);
+            if (index < 0)
+            {
+                return false;
+            }
+
+            registration = _waiting[index];
+            _waiting.RemoveAt(index);
+            registration.IsPaused = true;
+            registration.CancelScheduling();
+            _paused.Add(registration);
+        }
+
+        registration.MarkPaused();
+        OnChanged();
+        return true;
+    }
+
+    public bool Resume(Guid requestId)
+    {
+        QueueRegistration registration;
+        lock (_gate)
+        {
+            var index = _paused.FindIndex(item => item.Request.RequestId == requestId);
+            if (index < 0)
+            {
+                return false;
+            }
+
+            registration = _paused[index];
+            _paused.RemoveAt(index);
+            registration.IsPaused = false;
+            registration.ResetScheduling();
+            _waiting.Add(registration);
+        }
+
+        registration.MarkResumed();
         OnChanged();
         return true;
     }
@@ -63,13 +151,15 @@ public sealed class QueueCoordinator
         QueueRegistration? removed = null;
         lock (_gate)
         {
-            if (_active?.Request.RequestId != requestId)
+            var index = _active.FindIndex(item => item.Request.RequestId == requestId);
+            if (index < 0)
             {
                 return false;
             }
 
-            removed = _active;
-            _active = null;
+            removed = _active[index];
+            _active.RemoveAt(index);
+            EndActivePeriodIfEmpty();
         }
 
         removed.MarkRemoved();
@@ -82,10 +172,12 @@ public sealed class QueueCoordinator
         QueueRegistration? removed = null;
         lock (_gate)
         {
-            if (_active?.Request.RequestId == requestId)
+            var activeIndex = _active.FindIndex(item => item.Request.RequestId == requestId);
+            if (activeIndex >= 0)
             {
-                removed = _active;
-                _active = null;
+                removed = _active[activeIndex];
+                _active.RemoveAt(activeIndex);
+                EndActivePeriodIfEmpty();
             }
             else
             {
@@ -94,6 +186,15 @@ public sealed class QueueCoordinator
                 {
                     removed = _waiting[index];
                     _waiting.RemoveAt(index);
+                }
+                else
+                {
+                    index = _paused.FindIndex(item => item.Request.RequestId == requestId);
+                    if (index >= 0)
+                    {
+                        removed = _paused[index];
+                        _paused.RemoveAt(index);
+                    }
                 }
             }
         }
@@ -117,7 +218,13 @@ public sealed class QueueCoordinator
         lock (_gate)
         {
             var index = _waiting.FindIndex(item => item.Request.RequestId == requestId);
-            return index < 0 ? 0 : index + 1;
+            if (index >= 0)
+            {
+                return index + 1;
+            }
+
+            index = _paused.FindIndex(item => item.Request.RequestId == requestId);
+            return index < 0 ? 0 : _waiting.Count + index + 1;
         }
     }
 
@@ -126,8 +233,20 @@ public sealed class QueueCoordinator
         lock (_gate)
         {
             return new QueueState(
-                _active is null ? null : JobSnapshot.From(_active, JobStatus.Active),
-                _waiting.Select(item => JobSnapshot.From(item, JobStatus.Waiting)).ToArray());
+                _active.Select(item => JobSnapshot.From(item, JobStatus.Active)).ToArray(),
+                _waiting.Select(item => JobSnapshot.From(item, JobStatus.Waiting))
+                    .Concat(_paused.Select(item => JobSnapshot.From(item, JobStatus.Paused)))
+                    .ToArray());
+        }
+    }
+
+    public ActiveBarrier? PeekActiveBarrier()
+    {
+        lock (_gate)
+        {
+            return _active.Count == 0
+                ? null
+                : new ActiveBarrier(_active[0].Request, _activePeriodEnded.Token);
         }
     }
 
@@ -137,12 +256,13 @@ public sealed class QueueCoordinator
         lock (_gate)
         {
             registrations = _waiting
-                .Prepend(_active)
-                .Where(item => item is not null)
-                .Cast<QueueRegistration>()
+                .Concat(_paused)
+                .Concat(_active)
                 .ToArray();
             _waiting.Clear();
-            _active = null;
+            _paused.Clear();
+            _active.Clear();
+            EndActivePeriodIfEmpty();
         }
 
         foreach (var registration in registrations)
@@ -160,14 +280,17 @@ public sealed class QueueCoordinator
     {
         lock (_gate)
         {
-            var index = _waiting.FindIndex(item => item.Request.RequestId == requestId);
+            var list = _waiting.Any(item => item.Request.RequestId == requestId)
+                ? _waiting
+                : _paused;
+            var index = list.FindIndex(item => item.Request.RequestId == requestId);
             var target = index + offset;
-            if (index < 0 || target < 0 || target >= _waiting.Count)
+            if (index < 0 || target < 0 || target >= list.Count)
             {
                 return false;
             }
 
-            (_waiting[index], _waiting[target]) = (_waiting[target], _waiting[index]);
+            (list[index], list[target]) = (list[target], list[index]);
         }
 
         OnChanged();
@@ -175,6 +298,29 @@ public sealed class QueueCoordinator
     }
 
     private void OnChanged() => Changed?.Invoke(this, EventArgs.Empty);
+
+    private void BeginActivePeriod()
+    {
+        if (_active.Count == 0)
+        {
+            _activePeriodEnded = new CancellationTokenSource();
+        }
+    }
+
+    private void EndActivePeriodIfEmpty()
+    {
+        if (_active.Count == 0)
+        {
+            _activePeriodEnded.Cancel();
+        }
+    }
+
+    private static CancellationTokenSource CreateCanceledTokenSource()
+    {
+        var source = new CancellationTokenSource();
+        source.Cancel();
+        return source;
+    }
 }
 
 public sealed record JobRequest(
@@ -183,11 +329,13 @@ public sealed record JobRequest(
     int CallerPid,
     string Cwd,
     DateTimeOffset EnqueuedAt,
-    TimeSpan WaitTimeout);
+    TimeSpan WaitTimeout,
+    string? Command);
 
 public enum JobStatus
 {
     Waiting,
+    Paused,
     Active
 }
 
@@ -198,7 +346,9 @@ public sealed record JobSnapshot(
     string Cwd,
     DateTimeOffset EnqueuedAt,
     DateTimeOffset? ActivatedAt,
-    JobStatus Status)
+    JobStatus Status,
+    bool IsManualOverride,
+    string? Command)
 {
     internal static JobSnapshot From(QueueRegistration registration, JobStatus status) =>
         new(
@@ -208,16 +358,29 @@ public sealed record JobSnapshot(
             registration.Request.Cwd,
             registration.Request.EnqueuedAt,
             registration.ActivatedAt,
-            status);
+            status,
+            registration.IsManualOverride,
+            registration.Request.Command);
 }
 
-public sealed record QueueState(JobSnapshot? Active, IReadOnlyList<JobSnapshot> Waiting);
+public sealed record QueueState(
+    IReadOnlyList<JobSnapshot> ActiveJobs,
+    IReadOnlyList<JobSnapshot> Waiting);
+
+public sealed record ActiveBarrier(JobRequest Request, CancellationToken ActivePeriodEnded);
 
 public sealed class QueueRegistration
 {
     private readonly TaskCompletionSource _granted =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly CancellationTokenSource _removed = new();
+    private readonly Channel<QueueRegistrationState> _stateChanges =
+        Channel.CreateUnbounded<QueueRegistrationState>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false
+        });
+    private CancellationTokenSource _schedulingCanceled = new();
 
     internal QueueRegistration(JobRequest request)
     {
@@ -228,11 +391,42 @@ public sealed class QueueRegistration
 
     public DateTimeOffset? ActivatedAt { get; internal set; }
 
+    public bool IsManualOverride { get; internal set; }
+
+    public bool IsPaused { get; internal set; }
+
     public Task Granted => _granted.Task;
 
     public CancellationToken Removed => _removed.Token;
 
+    public CancellationToken SchedulingCanceled => _schedulingCanceled.Token;
+
+    public ValueTask<QueueRegistrationState> ReadStateChangeAsync(
+        CancellationToken cancellationToken) =>
+        _stateChanges.Reader.ReadAsync(cancellationToken);
+
     internal void MarkGranted() => _granted.TrySetResult();
 
-    internal void MarkRemoved() => _removed.Cancel();
+    internal void MarkPaused() =>
+        _stateChanges.Writer.TryWrite(QueueRegistrationState.Paused);
+
+    internal void MarkResumed() =>
+        _stateChanges.Writer.TryWrite(QueueRegistrationState.Resumed);
+
+    internal void CancelScheduling() => _schedulingCanceled.Cancel();
+
+    internal void ResetScheduling() => _schedulingCanceled = new CancellationTokenSource();
+
+    internal void MarkRemoved()
+    {
+        _schedulingCanceled.Cancel();
+        _removed.Cancel();
+        _stateChanges.Writer.TryComplete();
+    }
+}
+
+public enum QueueRegistrationState
+{
+    Paused,
+    Resumed
 }

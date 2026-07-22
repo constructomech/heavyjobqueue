@@ -114,15 +114,18 @@ try {
         label = $Label
         callerPid = $PID
         cwd = (Get-Location).ProviderPath
+        command = $Job.ToString()
         enqueuedAt = $enqueueTime.ToString("o")
         waitTimeoutSeconds = $TimeoutMinutes * 60
     }
     $writer.WriteLine(($enqueue | ConvertTo-Json -Compress))
 
     $granted = $false
+    $isPaused = $false
+    $pausedAt = $null
     while (-not $granted) {
         $remaining = $deadline - [DateTimeOffset]::UtcNow
-        if ($remaining -le [TimeSpan]::Zero) {
+        if (-not $isPaused -and $remaining -le [TimeSpan]::Zero) {
             $cancel = [ordered] @{
                 version = $protocolVersion
                 type = "cancel"
@@ -133,7 +136,12 @@ try {
             throw "Timed out waiting for the Heavy Job Queue grant."
         }
 
-        $message = Read-BrokerMessage -Timeout $remaining
+        $readTimeout = if ($isPaused) {
+            [Threading.Timeout]::InfiniteTimeSpan
+        } else {
+            $remaining
+        }
+        $message = Read-BrokerMessage -Timeout $readTimeout
         Assert-BrokerMessage -Message $message
 
         switch ($message.type) {
@@ -144,6 +152,27 @@ try {
                     "?"
                 }
                 Write-Host "Heavy job queued at position ${position}: $Label"
+            }
+            "paused" {
+                if ($message.requestId -ne $requestId.ToString("D")) {
+                    throw "The Heavy Job Queue broker paused a different request."
+                }
+                if (-not $isPaused) {
+                    $isPaused = $true
+                    $pausedAt = [DateTimeOffset]::UtcNow
+                    Write-Host "Heavy job paused by the queue operator: $Label"
+                }
+            }
+            "resumed" {
+                if ($message.requestId -ne $requestId.ToString("D")) {
+                    throw "The Heavy Job Queue broker resumed a different request."
+                }
+                if ($isPaused) {
+                    $deadline = $deadline.Add([DateTimeOffset]::UtcNow - $pausedAt)
+                    $isPaused = $false
+                    $pausedAt = $null
+                    Write-Host "Heavy job resumed in the queue: $Label"
+                }
             }
             "grant" {
                 if ($message.requestId -ne $requestId.ToString("D")) {

@@ -36,22 +36,9 @@ public sealed class LegacyLock
 
                 try
                 {
-                    var metadata = new
-                    {
-                        LockId = request.RequestId.ToString("D"),
-                        request.Label,
-                        UserName = Environment.UserName,
-                        MachineName = Environment.MachineName,
-                        ProcessId = request.CallerPid,
-                        AcquiredAt = DateTimeOffset.Now.ToString("o"),
-                        request.Cwd,
-                        RequestId = request.RequestId.ToString("D")
-                    };
-                    var json = JsonSerializer.Serialize(metadata);
-                    await File.WriteAllTextAsync(
+                    await WriteOwnerAsync(
                         _ownerPath,
-                        json,
-                        new UTF8Encoding(false),
+                        request,
                         cancellationToken);
                     return new LegacyLockLease(stream, _ownerPath);
                 }
@@ -60,12 +47,37 @@ public sealed class LegacyLock
                     stream.Dispose();
                     throw;
                 }
+
             }
             catch (IOException)
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
             }
         }
+    }
+
+    internal static Task WriteOwnerAsync(
+        string ownerPath,
+        JobRequest request,
+        CancellationToken cancellationToken)
+    {
+        var metadata = new
+        {
+            LockId = request.RequestId.ToString("D"),
+            request.Label,
+            UserName = Environment.UserName,
+            MachineName = Environment.MachineName,
+            ProcessId = request.CallerPid,
+            AcquiredAt = DateTimeOffset.Now.ToString("o"),
+            request.Cwd,
+            RequestId = request.RequestId.ToString("D")
+        };
+        var json = JsonSerializer.Serialize(metadata);
+        return File.WriteAllTextAsync(
+            ownerPath,
+            json,
+            new UTF8Encoding(false),
+            cancellationToken);
     }
 }
 
@@ -80,6 +92,9 @@ public sealed class LegacyLockLease : IDisposable
         _stream = stream;
         _ownerPath = ownerPath;
     }
+
+    public Task UpdateOwnerAsync(JobRequest request, CancellationToken cancellationToken) =>
+        LegacyLock.WriteOwnerAsync(_ownerPath, request, cancellationToken);
 
     public void Dispose()
     {

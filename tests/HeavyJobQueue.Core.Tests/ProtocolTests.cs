@@ -11,13 +11,14 @@ public sealed class ProtocolTests
         var requestId = Guid.NewGuid();
         var message = Protocol.ParseClientMessage(
             $$"""
-            {"version":1,"type":"enqueue","requestId":"{{requestId:D}}","label":"Build","callerPid":42,"cwd":"C:\\src","enqueuedAt":"2026-07-21T12:00:00Z","waitTimeoutSeconds":60}
+            {"version":1,"type":"enqueue","requestId":"{{requestId:D}}","label":"Build","callerPid":42,"cwd":"C:\\src","command":"dotnet build","enqueuedAt":"2026-07-21T12:00:00Z","waitTimeoutSeconds":60}
             """);
 
         Assert.AreEqual("enqueue", message.Type);
         Assert.AreEqual(requestId, message.RequestId);
         Assert.AreEqual("Build", message.Label);
         Assert.AreEqual(42, message.CallerPid);
+        Assert.AreEqual("dotnet build", message.Command);
         Assert.AreEqual(TimeSpan.FromMinutes(1), message.WaitTimeout);
     }
 
@@ -28,6 +29,17 @@ public sealed class ProtocolTests
             () => Protocol.ParseClientMessage("{"));
 
         Assert.AreEqual("malformed_json", exception.Code);
+    }
+
+    [TestMethod]
+    public void KeepsCompatibilityWithEnqueueMessagesWithoutCommand()
+    {
+        var message = Protocol.ParseClientMessage(
+            $$"""
+            {"version":1,"type":"enqueue","requestId":"{{Guid.NewGuid():D}}","label":"Legacy build","callerPid":42,"cwd":"C:\\src","enqueuedAt":"2026-07-21T12:00:00Z","waitTimeoutSeconds":60}
+            """);
+
+        Assert.IsNull(message.Command);
     }
 
     [TestMethod]

@@ -2,6 +2,10 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
+using System.Windows.Interop;
+using System.Windows.Media.Imaging;
+using ImageSource = System.Windows.Media.ImageSource;
+using Int32Rect = System.Windows.Int32Rect;
 
 namespace HeavyJobQueue.App;
 
@@ -45,6 +49,17 @@ internal static class TrayIconFactory
         {
             DestroyIcon(handle);
         }
+    }
+
+    public static ImageSource CreateImageSource()
+    {
+        using var icon = Create();
+        var image = Imaging.CreateBitmapSourceFromHIcon(
+            icon.Handle,
+            Int32Rect.Empty,
+            BitmapSizeOptions.FromWidthAndHeight(32, 32));
+        image.Freeze();
+        return image;
     }
 
     private static GraphicsPath RoundedRectangle(

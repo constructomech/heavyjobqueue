@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
 
@@ -146,7 +147,8 @@ public sealed class QueueBroker : IAsyncDisposable
                         enqueue.CallerPid!.Value,
                         enqueue.Cwd!,
                         enqueue.EnqueuedAt!.Value,
-                        enqueue.WaitTimeout!.Value));
+                        enqueue.WaitTimeout!.Value,
+                        enqueue.Command));
                 }
                 catch (InvalidOperationException)
                 {
@@ -168,41 +170,74 @@ public sealed class QueueBroker : IAsyncDisposable
 
                 using var readCancellation =
                     CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                using var timeoutCancellation = new CancellationTokenSource();
                 var clientMessageTask =
                     reader.ReadLineAsync(readCancellation.Token).AsTask();
-                var timeoutTask = Task.Delay(
-                    enqueue.WaitTimeout.Value,
-                    timeoutCancellation.Token);
-                var first = await Task.WhenAny(
-                    registration.Granted,
-                    clientMessageTask,
-                    timeoutTask);
-                cancellationToken.ThrowIfCancellationRequested();
+                var remainingWait = enqueue.WaitTimeout.Value;
+                var isPaused = false;
 
-                if (first == timeoutTask)
+                while (!registration.Granted.IsCompleted)
                 {
-                    _coordinator.Disconnect(enqueue.RequestId);
-                    readCancellation.Cancel();
-                    await ObserveCanceledReadAsync(clientMessageTask);
-                    await WriteErrorAsync(
-                        writer,
-                        "wait_timeout",
-                        "Timed out waiting for a heavy-job grant.");
-                    return;
+                    using var waitCancellation =
+                        CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    var stateChangeTask =
+                        registration.ReadStateChangeAsync(waitCancellation.Token).AsTask();
+                    var timeoutTask = Task.Delay(
+                        isPaused
+                            ? Timeout.InfiniteTimeSpan
+                            : remainingWait > TimeSpan.Zero
+                                ? remainingWait
+                                : TimeSpan.Zero,
+                        waitCancellation.Token);
+                    var waitStarted = Stopwatch.GetTimestamp();
+                    var first = await Task.WhenAny(
+                        registration.Granted,
+                        clientMessageTask,
+                        stateChangeTask,
+                        timeoutTask);
+
+                    if (!isPaused)
+                    {
+                        remainingWait -= Stopwatch.GetElapsedTime(waitStarted);
+                    }
+
+                    waitCancellation.Cancel();
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    if (first == timeoutTask)
+                    {
+                        _coordinator.Disconnect(enqueue.RequestId);
+                        readCancellation.Cancel();
+                        await ObserveCanceledReadAsync(clientMessageTask);
+                        await WriteErrorAsync(
+                            writer,
+                            "wait_timeout",
+                            "Timed out waiting for a heavy-job grant.");
+                        return;
+                    }
+
+                    if (first == clientMessageTask)
+                    {
+                        await HandlePreGrantMessageAsync(
+                            clientMessageTask.Result,
+                            enqueue.RequestId,
+                            writer);
+                        return;
+                    }
+
+                    if (first == stateChangeTask)
+                    {
+                        var stateChange = await stateChangeTask;
+                        isPaused = stateChange == QueueRegistrationState.Paused;
+                        await writer.WriteLineAsync(Protocol.Serialize(new
+                        {
+                            version = Protocol.Version,
+                            type = isPaused ? "paused" : "resumed",
+                            requestId = enqueue.RequestId,
+                            changedAt = DateTimeOffset.UtcNow
+                        }));
+                    }
                 }
 
-                if (first == clientMessageTask)
-                {
-                    timeoutCancellation.Cancel();
-                    await HandlePreGrantMessageAsync(
-                        clientMessageTask.Result,
-                        enqueue.RequestId,
-                        writer);
-                    return;
-                }
-
-                timeoutCancellation.Cancel();
                 await writer.WriteLineAsync(Protocol.Serialize(new
                 {
                     version = Protocol.Version,
@@ -294,18 +329,73 @@ public sealed class QueueBroker : IAsyncDisposable
     private async Task RunSchedulerAsync(CancellationToken cancellationToken)
     {
         LegacyLockLease? activeLease = null;
+        Guid? activeLeaseOwnerId = null;
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                if (_coordinator.Snapshot().Active is not null)
+                var state = _coordinator.Snapshot();
+                if (state.ActiveJobs.Count > 0)
                 {
+                    if (activeLease is null)
+                    {
+                        var barrier = _coordinator.PeekActiveBarrier();
+                        if (barrier is null)
+                        {
+                            continue;
+                        }
+
+                        using var barrierCancellation =
+                            CancellationTokenSource.CreateLinkedTokenSource(
+                                cancellationToken,
+                                barrier.ActivePeriodEnded);
+                        try
+                        {
+                            var barrierLease = await _legacyLock.AcquireAsync(
+                                barrier.Request,
+                                barrierCancellation.Token);
+                            if (_coordinator.PeekActiveBarrier() is { } currentBarrier)
+                            {
+                                if (currentBarrier.Request.RequestId !=
+                                    barrier.Request.RequestId)
+                                {
+                                    await barrierLease.UpdateOwnerAsync(
+                                        currentBarrier.Request,
+                                        cancellationToken);
+                                }
+
+                                activeLease = barrierLease;
+                                activeLeaseOwnerId = currentBarrier.Request.RequestId;
+                            }
+                            else
+                            {
+                                barrierLease.Dispose();
+                            }
+                        }
+                        catch (OperationCanceledException)
+                            when (!cancellationToken.IsCancellationRequested)
+                        {
+                        }
+
+                        continue;
+                    }
+
+                    if (_coordinator.PeekActiveBarrier() is { } activeBarrier &&
+                        activeBarrier.Request.RequestId != activeLeaseOwnerId)
+                    {
+                        await activeLease.UpdateOwnerAsync(
+                            activeBarrier.Request,
+                            cancellationToken);
+                        activeLeaseOwnerId = activeBarrier.Request.RequestId;
+                    }
+
                     await _schedulerSignal.WaitAsync(cancellationToken);
                     continue;
                 }
 
                 activeLease?.Dispose();
                 activeLease = null;
+                activeLeaseOwnerId = null;
 
                 var candidate = _coordinator.PeekNext();
                 if (candidate is null)
@@ -316,7 +406,7 @@ public sealed class QueueBroker : IAsyncDisposable
 
                 using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken,
-                    candidate.Removed);
+                    candidate.SchedulingCanceled);
 
                 LegacyLockLease lease;
                 try
@@ -333,6 +423,13 @@ public sealed class QueueBroker : IAsyncDisposable
                 if (_coordinator.TryActivateNext(candidate.Request.RequestId))
                 {
                     activeLease = lease;
+                    activeLeaseOwnerId = candidate.Request.RequestId;
+                }
+                else if (_coordinator.PeekActiveBarrier() is { } activeBarrier)
+                {
+                    await lease.UpdateOwnerAsync(activeBarrier.Request, cancellationToken);
+                    activeLease = lease;
+                    activeLeaseOwnerId = activeBarrier.Request.RequestId;
                 }
                 else
                 {

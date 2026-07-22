@@ -96,10 +96,26 @@ The optional third argument is the queue wait timeout in minutes and defaults to
 } -TimeoutMinutes 30
 ```
 
-The tray menu opens the queue window or exits the broker. The window shows the
-active job and all waiters with label, process ID, working directory, and
-elapsed time. Select a waiting row and use **Move up** or **Move down**. The
-active job cannot be reordered.
+The tray menu opens the queue window or exits the broker. The window shows all
+active jobs and waiters with label, process ID, working directory, and elapsed
+time. Select a waiting row and use **Move up** or **Move down**.
+
+**Run now** is an explicit manual override for times when you judge that the
+machine can handle concurrent work. After confirmation, the selected waiter is
+granted immediately, even when another broker or legacy job is active. You may
+approve multiple overrides. Automatic FIFO grants remain blocked until every
+active and overridden job finishes. The broker acquires or retains the legacy
+lock as a barrier when possible, but an override intentionally does not wait for
+an external legacy lock holder.
+
+**Pause / resume** moves a selected waiter to or from a paused section at the
+bottom of the queue. New jobs and unpaused waiters pass paused jobs. Resuming
+appends the job behind current waiters but ahead of jobs that remain paused.
+Time spent paused does not count against the wrapper's queue wait timeout.
+
+Hover over an active, waiting, or paused row to see the complete PowerShell
+scriptblock text submitted by current wrappers. Older protocol-v1 wrappers that
+did not send command metadata remain compatible and show a placeholder.
 
 ## Protocol and security
 

@@ -67,6 +67,7 @@
             <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
             <Setter Property="HorizontalGridLinesBrush" Value="{DynamicResource GridLineBrush}" />
             <Setter Property="VerticalGridLinesBrush" Value="{DynamicResource GridLineBrush}" />
+            <Setter Property="HeadersVisibility" Value="Column" />
             <Setter Property="AlternationCount" Value="2" />
             <Setter Property="RowBackground" Value="{DynamicResource SurfaceBrush}" />
             <Setter Property="AlternatingRowBackground" Value="{DynamicResource SurfaceAltBrush}" />

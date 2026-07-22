@@ -12,6 +12,7 @@ public partial class App : System.Windows.Application
     private QueueBroker? _broker;
     private MainWindow? _window;
     private Forms.NotifyIcon? _trayIcon;
+    private Icon? _trayImage;
 
     protected override void OnStartup(System.Windows.StartupEventArgs eventArgs)
     {
@@ -44,10 +45,11 @@ public partial class App : System.Windows.Application
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitApplication());
 
+        _trayImage = TrayIconFactory.Create();
         _trayIcon = new Forms.NotifyIcon
         {
             ContextMenuStrip = menu,
-            Icon = SystemIcons.Application,
+            Icon = _trayImage,
             Text = "Heavy Job Queue",
             Visible = true
         };
@@ -61,6 +63,7 @@ public partial class App : System.Windows.Application
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
         }
+        _trayImage?.Dispose();
 
         if (_broker is not null)
         {

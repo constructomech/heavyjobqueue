@@ -53,7 +53,10 @@ installer from the repository:
 
 This publishes the application to
 `%LOCALAPPDATA%\GitHubCopilot\HeavyJobQueue`, installs the replacement wrapper
-to `$HOME\.copilot\tools\Invoke-HeavyJob.ps1`, and launches the tray app.
+to `$HOME\.copilot\tools\Invoke-HeavyJob.ps1`, installs modular instructions at
+`$HOME\.copilot\instructions\heavy-job-queue.instructions.md`, and launches the
+tray app. The installer does not edit or replace
+`$HOME\.copilot\copilot-instructions.md`.
 
 Startup is opt-in and only changed when requested:
 
@@ -64,6 +67,15 @@ Startup is opt-in and only changed when requested:
 
 Use `-NoLaunch` to install without starting the application. The installer uses
 an isolated temporary publish directory and does not silently configure startup.
+Use `-SkipInstructions` if you only want the application and wrapper. Existing
+instructions at the managed path are updated only when they contain Heavy Job
+Queue's ownership marker; an unrelated file is never overwritten.
+
+Copilot CLI loads modular user instructions from
+`$HOME\.copilot\instructions\**\*.instructions.md`. Restart active sessions
+after installation, then use `/instructions` to confirm or disable the file.
+See GitHub's
+[custom instructions documentation](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-custom-instructions).
 
 ## Use
 

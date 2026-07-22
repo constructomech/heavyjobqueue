@@ -97,7 +97,7 @@ internal static class ThemeManager
     private static readonly IReadOnlyDictionary<string, string> DarkColors =
         new Dictionary<string, string>
         {
-            ["WindowBackgroundBrush"] = "#101820",
+            ["WindowBackgroundBrush"] = "#080D12",
             ["SurfaceBrush"] = "#16242D",
             ["SurfaceAltBrush"] = "#0D1F27",
             ["PrimaryTextBrush"] = "#F4F7FA",

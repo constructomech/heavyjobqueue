@@ -117,6 +117,11 @@ Hover over an active, waiting, or paused row to see the complete PowerShell
 scriptblock text submitted by current wrappers. Older protocol-v1 wrappers that
 did not send command metadata remain compatible and show a placeholder.
 
+The queue window also includes Task Manager-style 60-second utilization history:
+one graph per logical processor plus physical-memory usage. Sampling uses native
+Windows system information APIs and does not require performance-counter
+packages or an elevated process.
+
 ## Protocol and security
 
 Protocol v1 uses the named pipe `GitHubCopilot.HeavyJobQueue.v1` with

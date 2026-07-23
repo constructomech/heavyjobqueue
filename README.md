@@ -115,9 +115,9 @@ active jobs and waiters with label, process ID, working directory, and elapsed
 time. Select a waiting row and use **Move up** or **Move down**.
 
 **Run now** is an explicit manual override for times when you judge that the
-machine can handle concurrent work. After confirmation, the selected waiter is
-granted immediately, even when another job is active. You may
-approve multiple overrides. Automatic FIFO grants remain blocked until every
+machine can handle concurrent work. The selected waiter is granted immediately
+without a confirmation dialog, even when another job is active. You may approve
+multiple overrides. Automatic FIFO grants remain blocked until every
 active and overridden job finishes.
 
 **Pause / resume** moves a selected waiter to or from a paused section at the

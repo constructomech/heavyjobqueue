@@ -94,19 +94,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var result = System.Windows.MessageBox.Show(
-            $"Run '{row.Label}' immediately?\n\n" +
-            "This may run it concurrently with active jobs. " +
-            "Automatic queue grants will remain blocked until every active job finishes.",
-            "Approve concurrent heavy job",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning,
-            MessageBoxResult.No);
-
-        if (result == MessageBoxResult.Yes)
-        {
-            _coordinator.RunNow(row.RequestId);
-        }
+        _coordinator.RunNow(row.RequestId);
     }
 
     private void PauseResume_Click(object sender, RoutedEventArgs eventArgs)

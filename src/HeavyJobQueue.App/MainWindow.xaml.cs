@@ -96,7 +96,7 @@ public partial class MainWindow : Window
 
         var result = System.Windows.MessageBox.Show(
             $"Run '{row.Label}' immediately?\n\n" +
-            "This may run it concurrently with active or legacy jobs. " +
+            "This may run it concurrently with active jobs. " +
             "Automatic queue grants will remain blocked until every active job finishes.",
             "Approve concurrent heavy job",
             MessageBoxButton.YesNo,

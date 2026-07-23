@@ -18,5 +18,4 @@ Run each heavy command through the queue wrapper:
 
 Acquire the queue slot only for the actual heavy command. Do not hold it while
 planning, reasoning, editing, or reviewing output. If the tray broker or wrapper
-is unavailable, report the problem and stop; do not bypass the queue or legacy
-lock.
+is unavailable, report the problem and stop; do not bypass the queue.

@@ -4,39 +4,67 @@ using System.Threading.Channels;
 
 public sealed class QueueCoordinator
 {
+    private const int MaximumCompletionHistory = 256;
+
     private readonly object _gate = new();
     private readonly List<QueueRegistration> _waiting = [];
     private readonly List<QueueRegistration> _paused = [];
     private readonly List<QueueRegistration> _active = [];
-    private CancellationTokenSource _activePeriodEnded = CreateCanceledTokenSource();
+    private readonly List<DurableCompletion> _completions = [];
+    private readonly QueueStateStore? _stateStore;
+
+    public QueueCoordinator(QueueStateStore? stateStore = null)
+    {
+        _stateStore = stateStore;
+        if (stateStore is not null)
+        {
+            Restore(stateStore.Load());
+        }
+    }
 
     public event EventHandler? Changed;
 
-    public QueueRegistration Enqueue(JobRequest request)
+    public QueueAttachment AttachOrEnqueue(JobRequest request)
     {
         QueueRegistration registration;
+        var isNew = false;
         lock (_gate)
         {
-            if (_active.Any(item => item.Request.RequestId == request.RequestId) ||
-                _waiting.Any(item => item.Request.RequestId == request.RequestId) ||
-                _paused.Any(item => item.Request.RequestId == request.RequestId))
+            if (_completions.Any(item => item.RequestId == request.RequestId))
             {
-                throw new InvalidOperationException($"Request '{request.RequestId}' is already queued.");
+                throw new RequestCompletedException(request.RequestId);
             }
 
-            registration = new QueueRegistration(request);
-            _waiting.Add(registration);
+            registration = FindRegistration(request.RequestId)!;
+            if (registration is null)
+            {
+                registration = new QueueRegistration(request, isConnected: true);
+                _waiting.Add(registration);
+                PersistOrRollbackLocked(() => _waiting.Remove(registration));
+                isNew = true;
+            }
+            else
+            {
+                registration.Attach(request);
+            }
         }
 
         OnChanged();
-        return registration;
+        return new QueueAttachment(registration, isNew);
     }
+
+    public QueueRegistration Enqueue(JobRequest request) =>
+        AttachOrEnqueue(request).Registration;
 
     public QueueRegistration? PeekNext()
     {
         lock (_gate)
         {
-            return _active.Count == 0 && _waiting.Count > 0 ? _waiting[0] : null;
+            return _active.Count == 0 &&
+                _waiting.Count > 0 &&
+                _waiting[0].IsConnected
+                    ? _waiting[0]
+                    : null;
         }
     }
 
@@ -47,16 +75,23 @@ public sealed class QueueCoordinator
         {
             if (_active.Count > 0 ||
                 _waiting.Count == 0 ||
-                _waiting[0].Request.RequestId != requestId)
+                _waiting[0].Request.RequestId != requestId ||
+                !_waiting[0].IsConnected)
             {
                 return false;
             }
 
             registration = _waiting[0];
             _waiting.RemoveAt(0);
-            BeginActivePeriod();
+            var previousActivatedAt = registration.ActivatedAt;
             registration.ActivatedAt = DateTimeOffset.UtcNow;
             _active.Add(registration);
+            PersistOrRollbackLocked(() =>
+            {
+                _active.Remove(registration);
+                registration.ActivatedAt = previousActivatedAt;
+                _waiting.Insert(0, registration);
+            });
         }
 
         registration.MarkGranted();
@@ -69,30 +104,56 @@ public sealed class QueueCoordinator
         QueueRegistration? registration = null;
         lock (_gate)
         {
+            List<QueueRegistration> source;
             var index = _waiting.FindIndex(item => item.Request.RequestId == requestId);
             if (index >= 0)
             {
+                source = _waiting;
                 registration = _waiting[index];
+                if (!registration.IsConnected)
+                {
+                    return false;
+                }
+
                 _waiting.RemoveAt(index);
             }
             else
             {
                 index = _paused.FindIndex(item => item.Request.RequestId == requestId);
-                if (index < 0)
+                if (index < 0 || !_paused[index].IsConnected)
                 {
                     return false;
                 }
 
+                source = _paused;
                 registration = _paused[index];
                 _paused.RemoveAt(index);
             }
 
-            BeginActivePeriod();
+            var previousActivatedAt = registration.ActivatedAt;
+            var wasPaused = registration.IsPaused;
+            var previousPausedAt = registration.PausedAt;
+            var wasManualOverride = registration.IsManualOverride;
             registration.ActivatedAt = DateTimeOffset.UtcNow;
             registration.IsPaused = false;
+            registration.PausedAt = null;
             registration.IsManualOverride = true;
             registration.CancelScheduling();
             _active.Add(registration);
+            PersistOrRollbackLocked(() =>
+            {
+                _active.Remove(registration);
+                registration.ActivatedAt = previousActivatedAt;
+                registration.IsPaused = wasPaused;
+                registration.PausedAt = previousPausedAt;
+                registration.IsManualOverride = wasManualOverride;
+                registration.ResetScheduling();
+                if (wasPaused)
+                {
+                    registration.CancelScheduling();
+                }
+                source.Insert(index, registration);
+            });
         }
 
         registration.MarkGranted();
@@ -114,8 +175,17 @@ public sealed class QueueCoordinator
             registration = _waiting[index];
             _waiting.RemoveAt(index);
             registration.IsPaused = true;
+            registration.PausedAt = DateTimeOffset.UtcNow;
             registration.CancelScheduling();
             _paused.Add(registration);
+            PersistOrRollbackLocked(() =>
+            {
+                _paused.Remove(registration);
+                registration.IsPaused = false;
+                registration.PausedAt = null;
+                registration.ResetScheduling();
+                _waiting.Insert(index, registration);
+            });
         }
 
         registration.MarkPaused();
@@ -136,9 +206,22 @@ public sealed class QueueCoordinator
 
             registration = _paused[index];
             _paused.RemoveAt(index);
+            var previousPausedAt = registration.PausedAt;
+            var previousPausedDuration = registration.TotalPausedDuration;
+            registration.AddPausedDuration(DateTimeOffset.UtcNow);
             registration.IsPaused = false;
+            registration.PausedAt = null;
             registration.ResetScheduling();
             _waiting.Add(registration);
+            PersistOrRollbackLocked(() =>
+            {
+                _waiting.Remove(registration);
+                registration.IsPaused = true;
+                registration.PausedAt = previousPausedAt;
+                registration.TotalPausedDuration = previousPausedDuration;
+                registration.CancelScheduling();
+                _paused.Insert(index, registration);
+            });
         }
 
         registration.MarkResumed();
@@ -146,20 +229,73 @@ public sealed class QueueCoordinator
         return true;
     }
 
-    public bool Complete(Guid requestId)
+    public bool Complete(Guid requestId, string leaseName)
     {
-        QueueRegistration? removed = null;
+        QueueRegistration? removed;
         lock (_gate)
         {
-            var index = _active.FindIndex(item => item.Request.RequestId == requestId);
+            if (_completions.Any(item =>
+                item.RequestId == requestId &&
+                string.Equals(item.LeaseName, leaseName, StringComparison.Ordinal)))
+            {
+                return true;
+            }
+
+            var source = _active;
+            var index = source.FindIndex(item =>
+                item.Request.RequestId == requestId &&
+                string.Equals(item.Request.LeaseName, leaseName, StringComparison.Ordinal));
+            if (index < 0)
+            {
+                source = _waiting;
+                index = source.FindIndex(item =>
+                    !item.IsConnected &&
+                    item.Request.RequestId == requestId &&
+                    string.Equals(
+                        item.Request.LeaseName,
+                        leaseName,
+                        StringComparison.Ordinal));
+            }
+            if (index < 0)
+            {
+                source = _paused;
+                index = source.FindIndex(item =>
+                    !item.IsConnected &&
+                    item.Request.RequestId == requestId &&
+                    string.Equals(
+                        item.Request.LeaseName,
+                        leaseName,
+                        StringComparison.Ordinal));
+            }
             if (index < 0)
             {
                 return false;
             }
 
-            removed = _active[index];
-            _active.RemoveAt(index);
-            EndActivePeriodIfEmpty();
+            removed = source[index];
+            source.RemoveAt(index);
+            var completion = new DurableCompletion(
+                requestId,
+                leaseName,
+                DateTimeOffset.UtcNow);
+            _completions.Add(completion);
+            DurableCompletion[]? prunedCompletions = null;
+            if (_completions.Count > MaximumCompletionHistory)
+            {
+                var pruneCount = _completions.Count - MaximumCompletionHistory;
+                prunedCompletions = _completions.Take(pruneCount).ToArray();
+                _completions.RemoveRange(0, pruneCount);
+            }
+
+            PersistOrRollbackLocked(() =>
+            {
+                _completions.Remove(completion);
+                if (prunedCompletions is not null)
+                {
+                    _completions.InsertRange(0, prunedCompletions);
+                }
+                source.Insert(index, removed);
+            });
         }
 
         removed.MarkRemoved();
@@ -167,46 +303,101 @@ public sealed class QueueCoordinator
         return true;
     }
 
-    public bool Disconnect(Guid requestId)
+    public bool Remove(Guid requestId, string? leaseName = null)
     {
-        QueueRegistration? removed = null;
+        QueueRegistration? removed;
         lock (_gate)
         {
-            var activeIndex = _active.FindIndex(item => item.Request.RequestId == requestId);
-            if (activeIndex >= 0)
+            removed = FindRegistration(requestId);
+            if (removed is null ||
+                leaseName is not null &&
+                !string.Equals(removed.Request.LeaseName, leaseName, StringComparison.Ordinal))
             {
-                removed = _active[activeIndex];
-                _active.RemoveAt(activeIndex);
-                EndActivePeriodIfEmpty();
+                return false;
             }
-            else
-            {
-                var index = _waiting.FindIndex(item => item.Request.RequestId == requestId);
-                if (index >= 0)
-                {
-                    removed = _waiting[index];
-                    _waiting.RemoveAt(index);
-                }
-                else
-                {
-                    index = _paused.FindIndex(item => item.Request.RequestId == requestId);
-                    if (index >= 0)
-                    {
-                        removed = _paused[index];
-                        _paused.RemoveAt(index);
-                    }
-                }
-            }
-        }
 
-        if (removed is null)
-        {
-            return false;
+            var source = _active.Contains(removed)
+                ? _active
+                : _waiting.Contains(removed)
+                    ? _waiting
+                    : _paused;
+            var index = source.IndexOf(removed);
+            source.RemoveAt(index);
+            PersistOrRollbackLocked(() => source.Insert(index, removed));
         }
 
         removed.MarkRemoved();
         OnChanged();
         return true;
+    }
+
+    public bool MarkDisconnected(Guid requestId)
+    {
+        lock (_gate)
+        {
+            var registration = FindRegistration(requestId);
+            if (registration is null || !registration.IsConnected)
+            {
+                return false;
+            }
+
+            registration.MarkDisconnected();
+        }
+
+        OnChanged();
+        return true;
+    }
+
+    public int RemoveExpiredDisconnectedLeases()
+    {
+        (QueueRegistration Registration, List<QueueRegistration> Source, int Index)[] removed;
+        lock (_gate)
+        {
+            removed = _active
+                .Concat(_waiting)
+                .Concat(_paused)
+                .Where(item =>
+                    !item.IsConnected &&
+                    !RequestLease.IsHeld(item.Request.LeaseName))
+                .Select(item =>
+                {
+                    var source = _active.Contains(item)
+                        ? _active
+                        : _waiting.Contains(item)
+                            ? _waiting
+                            : _paused;
+                    return (item, source, source.IndexOf(item));
+                })
+                .ToArray();
+            if (removed.Length == 0)
+            {
+                return 0;
+            }
+
+            foreach (var (registration, source, _) in removed)
+            {
+                source.Remove(registration);
+            }
+
+            PersistOrRollbackLocked(() =>
+            {
+                foreach (var group in removed.GroupBy(item => item.Source))
+                {
+                    foreach (var item in group.OrderBy(item => item.Index))
+                    {
+                        item.Source.Insert(item.Index, item.Registration);
+                    }
+                }
+            });
+        }
+
+        foreach (var (registration, _, _) in removed)
+        {
+            registration.MarkRemoved();
+        }
+
+        OnChanged();
+        return removed.Length;
     }
 
     public bool MoveUp(Guid requestId) => Move(requestId, -1);
@@ -240,42 +431,6 @@ public sealed class QueueCoordinator
         }
     }
 
-    public ActiveBarrier? PeekActiveBarrier()
-    {
-        lock (_gate)
-        {
-            return _active.Count == 0
-                ? null
-                : new ActiveBarrier(_active[0].Request, _activePeriodEnded.Token);
-        }
-    }
-
-    public void DisconnectAll()
-    {
-        QueueRegistration[] registrations;
-        lock (_gate)
-        {
-            registrations = _waiting
-                .Concat(_paused)
-                .Concat(_active)
-                .ToArray();
-            _waiting.Clear();
-            _paused.Clear();
-            _active.Clear();
-            EndActivePeriodIfEmpty();
-        }
-
-        foreach (var registration in registrations)
-        {
-            registration.MarkRemoved();
-        }
-
-        if (registrations.Length > 0)
-        {
-            OnChanged();
-        }
-    }
-
     private bool Move(Guid requestId, int offset)
     {
         lock (_gate)
@@ -291,36 +446,86 @@ public sealed class QueueCoordinator
             }
 
             (list[index], list[target]) = (list[target], list[index]);
+            PersistOrRollbackLocked(() =>
+                (list[index], list[target]) = (list[target], list[index]));
         }
 
         OnChanged();
         return true;
     }
 
+    private QueueRegistration? FindRegistration(Guid requestId) =>
+        _active
+            .Concat(_waiting)
+            .Concat(_paused)
+            .FirstOrDefault(item => item.Request.RequestId == requestId);
+
+    private void Restore(DurableQueueState state)
+    {
+        foreach (var job in state.Jobs)
+        {
+            var request = new JobRequest(
+                job.RequestId,
+                job.Label,
+                job.CallerPid,
+                job.Cwd,
+                job.EnqueuedAt,
+                job.WaitTimeout,
+                job.Command,
+                job.LeaseName);
+            var registration = new QueueRegistration(request, isConnected: false)
+            {
+                ActivatedAt = job.ActivatedAt,
+                IsManualOverride = job.IsManualOverride,
+                IsPaused = job.Status == JobStatus.Paused,
+                PausedAt = job.PausedAt,
+                TotalPausedDuration = job.TotalPausedDuration
+            };
+
+            switch (job.Status)
+            {
+                case JobStatus.Active:
+                    registration.MarkGranted();
+                    _active.Add(registration);
+                    break;
+                case JobStatus.Paused:
+                    registration.CancelScheduling();
+                    _paused.Add(registration);
+                    break;
+                default:
+                    _waiting.Add(registration);
+                    break;
+            }
+        }
+
+        _completions.AddRange(state.Completions.TakeLast(MaximumCompletionHistory));
+    }
+
+    private void PersistLocked()
+    {
+        _stateStore?.Save(new DurableQueueState(
+            QueueStateStore.CurrentVersion,
+            _active.Select(item => DurableJobFactory.From(item, JobStatus.Active))
+                .Concat(_waiting.Select(item => DurableJobFactory.From(item, JobStatus.Waiting)))
+                .Concat(_paused.Select(item => DurableJobFactory.From(item, JobStatus.Paused)))
+                .ToArray(),
+            _completions.ToArray()));
+    }
+
+    private void PersistOrRollbackLocked(Action rollback)
+    {
+        try
+        {
+            PersistLocked();
+        }
+        catch
+        {
+            rollback();
+            throw;
+        }
+    }
+
     private void OnChanged() => Changed?.Invoke(this, EventArgs.Empty);
-
-    private void BeginActivePeriod()
-    {
-        if (_active.Count == 0)
-        {
-            _activePeriodEnded = new CancellationTokenSource();
-        }
-    }
-
-    private void EndActivePeriodIfEmpty()
-    {
-        if (_active.Count == 0)
-        {
-            _activePeriodEnded.Cancel();
-        }
-    }
-
-    private static CancellationTokenSource CreateCanceledTokenSource()
-    {
-        var source = new CancellationTokenSource();
-        source.Cancel();
-        return source;
-    }
 }
 
 public sealed record JobRequest(
@@ -330,7 +535,8 @@ public sealed record JobRequest(
     string Cwd,
     DateTimeOffset EnqueuedAt,
     TimeSpan WaitTimeout,
-    string? Command);
+    string? Command,
+    string LeaseName);
 
 public enum JobStatus
 {
@@ -367,7 +573,10 @@ public sealed record QueueState(
     IReadOnlyList<JobSnapshot> ActiveJobs,
     IReadOnlyList<JobSnapshot> Waiting);
 
-public sealed record ActiveBarrier(JobRequest Request, CancellationToken ActivePeriodEnded);
+public sealed record QueueAttachment(QueueRegistration Registration, bool IsNew);
+
+public sealed class RequestCompletedException(Guid requestId)
+    : InvalidOperationException($"Request '{requestId}' has already completed.");
 
 public sealed class QueueRegistration
 {
@@ -382,9 +591,10 @@ public sealed class QueueRegistration
         });
     private CancellationTokenSource _schedulingCanceled = new();
 
-    internal QueueRegistration(JobRequest request)
+    internal QueueRegistration(JobRequest request, bool isConnected)
     {
         Request = request;
+        IsConnected = isConnected;
     }
 
     public JobRequest Request { get; }
@@ -395,15 +605,60 @@ public sealed class QueueRegistration
 
     public bool IsPaused { get; internal set; }
 
+    public bool IsConnected { get; private set; }
+
+    public DateTimeOffset? PausedAt { get; internal set; }
+
+    public TimeSpan TotalPausedDuration { get; internal set; }
+
     public Task Granted => _granted.Task;
 
     public CancellationToken Removed => _removed.Token;
 
     public CancellationToken SchedulingCanceled => _schedulingCanceled.Token;
 
+    public TimeSpan GetRemainingWait(DateTimeOffset now)
+    {
+        var paused = TotalPausedDuration;
+        if (IsPaused && PausedAt is not null)
+        {
+            paused += now - PausedAt.Value;
+        }
+
+        return Request.WaitTimeout - (now - Request.EnqueuedAt - paused);
+    }
+
     public ValueTask<QueueRegistrationState> ReadStateChangeAsync(
         CancellationToken cancellationToken) =>
         _stateChanges.Reader.ReadAsync(cancellationToken);
+
+    internal void Attach(JobRequest request)
+    {
+        if (IsConnected)
+        {
+            throw new InvalidOperationException(
+                $"Request '{request.RequestId}' already has a connected client.");
+        }
+
+        if (request.CallerPid != Request.CallerPid ||
+            !string.Equals(request.LeaseName, Request.LeaseName, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Request '{request.RequestId}' does not match its durable lease.");
+        }
+
+        IsConnected = true;
+    }
+
+    internal void MarkDisconnected() => IsConnected = false;
+
+    internal void AddPausedDuration(DateTimeOffset resumedAt)
+    {
+        if (PausedAt is not null)
+        {
+            TotalPausedDuration += resumedAt - PausedAt.Value;
+        }
+    }
 
     internal void MarkGranted() => _granted.TrySetResult();
 
@@ -429,4 +684,23 @@ public enum QueueRegistrationState
 {
     Paused,
     Resumed
+}
+
+internal static class DurableJobFactory
+{
+    public static DurableJob From(QueueRegistration registration, JobStatus status) =>
+        new(
+            registration.Request.RequestId,
+            registration.Request.Label,
+            registration.Request.CallerPid,
+            registration.Request.Cwd,
+            registration.Request.EnqueuedAt,
+            registration.Request.WaitTimeout,
+            registration.Request.Command,
+            registration.Request.LeaseName,
+            registration.ActivatedAt,
+            status,
+            registration.IsManualOverride,
+            registration.PausedAt,
+            registration.TotalPausedDuration);
 }

@@ -37,8 +37,8 @@ public partial class App : System.Windows.Application
 
         SystemEvents.UserPreferenceChanged += SystemThemeChanged;
 
-        var coordinator = new QueueCoordinator();
-        _broker = new QueueBroker(coordinator, new LegacyLock());
+        var coordinator = new QueueCoordinator(new QueueStateStore());
+        _broker = new QueueBroker(coordinator);
         _broker.Start();
 
         _window = new MainWindow(coordinator);

@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
 
@@ -8,18 +7,19 @@ namespace HeavyJobQueue.Core;
 public sealed class QueueBroker : IAsyncDisposable
 {
     private readonly QueueCoordinator _coordinator;
-    private readonly LegacyLock _legacyLock;
+    private readonly string _pipeName;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly SemaphoreSlim _schedulerSignal = new(0);
     private readonly ConcurrentDictionary<int, Task> _clients = new();
     private Task? _acceptTask;
     private Task? _schedulerTask;
+    private Task? _leaseMonitorTask;
     private int _clientSequence;
 
-    public QueueBroker(QueueCoordinator coordinator, LegacyLock legacyLock)
+    public QueueBroker(QueueCoordinator coordinator, string? pipeName = null)
     {
         _coordinator = coordinator;
-        _legacyLock = legacyLock;
+        _pipeName = pipeName ?? Protocol.PipeName;
         _coordinator.Changed += CoordinatorChanged;
     }
 
@@ -32,6 +32,7 @@ public sealed class QueueBroker : IAsyncDisposable
 
         _acceptTask = Task.Run(() => RunAcceptLoopAsync(_shutdown.Token));
         _schedulerTask = Task.Run(() => RunSchedulerAsync(_shutdown.Token));
+        _leaseMonitorTask = Task.Run(() => RunLeaseMonitorAsync(_shutdown.Token));
     }
 
     public async ValueTask DisposeAsync()
@@ -39,9 +40,8 @@ public sealed class QueueBroker : IAsyncDisposable
         _coordinator.Changed -= CoordinatorChanged;
         _shutdown.Cancel();
         _schedulerSignal.Release();
-        _coordinator.DisconnectAll();
 
-        var tasks = new[] { _acceptTask, _schedulerTask }
+        var tasks = new[] { _acceptTask, _schedulerTask, _leaseMonitorTask }
             .Where(task => task is not null)
             .Cast<Task>()
             .Concat(_clients.Values)
@@ -66,7 +66,7 @@ public sealed class QueueBroker : IAsyncDisposable
             while (!cancellationToken.IsCancellationRequested)
             {
                 var pipe = new NamedPipeServerStream(
-                    Protocol.PipeName,
+                    _pipeName,
                     PipeDirection.InOut,
                     NamedPipeServerStream.MaxAllowedServerInstances,
                     PipeTransmissionMode.Byte,
@@ -101,14 +101,14 @@ public sealed class QueueBroker : IAsyncDisposable
         NamedPipeServerStream pipe,
         CancellationToken cancellationToken)
     {
-        Guid? requestId = null;
+        Guid? attachedRequestId = null;
         await using (pipe)
         using (var reader = new StreamReader(
             pipe,
             new UTF8Encoding(false, true),
             detectEncodingFromByteOrderMarks: false,
             leaveOpen: true))
-        using (var writer = new StreamWriter(
+        using (var writer = new SafeStreamWriter(
             pipe,
             new UTF8Encoding(false),
             leaveOpen: true)
@@ -119,17 +119,11 @@ public sealed class QueueBroker : IAsyncDisposable
         {
             try
             {
-                ClientMessage enqueue;
+                ClientMessage first;
                 try
                 {
-                    enqueue = Protocol.ParseClientMessage(
+                    first = Protocol.ParseClientMessage(
                         await reader.ReadLineAsync(cancellationToken));
-                    if (enqueue.Type != "enqueue")
-                    {
-                        throw new ProtocolException(
-                            "expected_enqueue",
-                            "The first message must be an enqueue request.");
-                    }
                 }
                 catch (ProtocolException exception)
                 {
@@ -137,144 +131,62 @@ public sealed class QueueBroker : IAsyncDisposable
                     return;
                 }
 
-                requestId = enqueue.RequestId;
-                QueueRegistration registration;
-                try
+                if (first.Type == "complete")
                 {
-                    registration = _coordinator.Enqueue(new JobRequest(
-                        enqueue.RequestId,
-                        enqueue.Label!,
-                        enqueue.CallerPid!.Value,
-                        enqueue.Cwd!,
-                        enqueue.EnqueuedAt!.Value,
-                        enqueue.WaitTimeout!.Value,
-                        enqueue.Command));
+                    await CompleteAsync(first, writer);
+                    return;
                 }
-                catch (InvalidOperationException)
+
+                if (first.Type == "cancel")
                 {
-                    requestId = null;
+                    await CancelAsync(first, writer);
+                    return;
+                }
+
+                if (first.Type != "enqueue")
+                {
                     await WriteErrorAsync(
                         writer,
-                        "duplicate_request",
-                        "A job with this request ID is already queued.");
+                        "expected_enqueue",
+                        "The first message must enqueue, complete, or cancel a request.");
                     return;
                 }
 
-                await writer.WriteLineAsync(Protocol.Serialize(new
+                attachedRequestId = first.RequestId;
+                QueueAttachment attachment;
+                try
                 {
-                    version = Protocol.Version,
-                    type = "queued",
-                    requestId = enqueue.RequestId,
-                    position = _coordinator.GetWaitingPosition(enqueue.RequestId)
-                }));
-
-                using var readCancellation =
-                    CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                var clientMessageTask =
-                    reader.ReadLineAsync(readCancellation.Token).AsTask();
-                var remainingWait = enqueue.WaitTimeout.Value;
-                var isPaused = false;
-
-                while (!registration.Granted.IsCompleted)
-                {
-                    using var waitCancellation =
-                        CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                    var stateChangeTask =
-                        registration.ReadStateChangeAsync(waitCancellation.Token).AsTask();
-                    var timeoutTask = Task.Delay(
-                        isPaused
-                            ? Timeout.InfiniteTimeSpan
-                            : remainingWait > TimeSpan.Zero
-                                ? remainingWait
-                                : TimeSpan.Zero,
-                        waitCancellation.Token);
-                    var waitStarted = Stopwatch.GetTimestamp();
-                    var first = await Task.WhenAny(
-                        registration.Granted,
-                        clientMessageTask,
-                        stateChangeTask,
-                        timeoutTask);
-
-                    if (!isPaused)
-                    {
-                        remainingWait -= Stopwatch.GetElapsedTime(waitStarted);
-                    }
-
-                    waitCancellation.Cancel();
-                    cancellationToken.ThrowIfCancellationRequested();
-
-                    if (first == timeoutTask)
-                    {
-                        _coordinator.Disconnect(enqueue.RequestId);
-                        readCancellation.Cancel();
-                        await ObserveCanceledReadAsync(clientMessageTask);
-                        await WriteErrorAsync(
-                            writer,
-                            "wait_timeout",
-                            "Timed out waiting for a heavy-job grant.");
-                        return;
-                    }
-
-                    if (first == clientMessageTask)
-                    {
-                        await HandlePreGrantMessageAsync(
-                            clientMessageTask.Result,
-                            enqueue.RequestId,
-                            writer);
-                        return;
-                    }
-
-                    if (first == stateChangeTask)
-                    {
-                        var stateChange = await stateChangeTask;
-                        isPaused = stateChange == QueueRegistrationState.Paused;
-                        await writer.WriteLineAsync(Protocol.Serialize(new
-                        {
-                            version = Protocol.Version,
-                            type = isPaused ? "paused" : "resumed",
-                            requestId = enqueue.RequestId,
-                            changedAt = DateTimeOffset.UtcNow
-                        }));
-                    }
+                    attachment = _coordinator.AttachOrEnqueue(new JobRequest(
+                        first.RequestId,
+                        first.Label!,
+                        first.CallerPid!.Value,
+                        first.Cwd!,
+                        first.EnqueuedAt!.Value,
+                        first.WaitTimeout!.Value,
+                        first.Command,
+                        first.LeaseName!));
                 }
-
-                await writer.WriteLineAsync(Protocol.Serialize(new
+                catch (RequestCompletedException)
                 {
-                    version = Protocol.Version,
-                    type = "grant",
-                    requestId = enqueue.RequestId,
-                    grantedAt = DateTimeOffset.UtcNow
-                }));
-
-                var completion = Protocol.ParseClientMessage(await clientMessageTask);
-                if (completion.RequestId != enqueue.RequestId)
-                {
-                    throw new ProtocolException(
-                        "request_id_mismatch",
-                        "The completion request ID does not match the active job.");
+                    attachedRequestId = null;
+                    await WriteErrorAsync(
+                        writer,
+                        "request_completed",
+                        "This request has already completed.");
+                    return;
                 }
-
-                if (completion.Type == "cancel")
+                catch (InvalidOperationException exception)
                 {
-                    _coordinator.Disconnect(enqueue.RequestId);
+                    attachedRequestId = null;
+                    await WriteErrorAsync(writer, "duplicate_request", exception.Message);
                     return;
                 }
 
-                if (completion.Type != "complete")
-                {
-                    throw new ProtocolException(
-                        "expected_completion",
-                        "The active client must send a complete or cancel message.");
-                }
-
-                _coordinator.Complete(enqueue.RequestId);
-                requestId = null;
-                await writer.WriteLineAsync(Protocol.Serialize(new
-                {
-                    version = Protocol.Version,
-                    type = "ack",
-                    requestId = enqueue.RequestId
-                }));
+                await ServeAttachedClientAsync(
+                    attachment.Registration,
+                    reader,
+                    writer,
+                    cancellationToken);
             }
             catch (ProtocolException exception)
             {
@@ -288,114 +200,202 @@ public sealed class QueueBroker : IAsyncDisposable
             }
             finally
             {
-                if (requestId is not null)
+                if (attachedRequestId is not null)
                 {
-                    _coordinator.Disconnect(requestId.Value);
+                    _coordinator.MarkDisconnected(attachedRequestId.Value);
                 }
             }
         }
+    }
+
+    private async Task ServeAttachedClientAsync(
+        QueueRegistration registration,
+        StreamReader reader,
+        StreamWriter writer,
+        CancellationToken cancellationToken)
+    {
+        var requestId = registration.Request.RequestId;
+        await writer.WriteLineAsync(Protocol.Serialize(new
+        {
+            version = Protocol.Version,
+            type = "queued",
+            requestId,
+            position = _coordinator.GetWaitingPosition(requestId),
+            restored = !registration.Granted.IsCompleted
+        }));
+
+        if (registration.IsPaused)
+        {
+            await WriteStateChangeAsync(writer, requestId, isPaused: true);
+        }
+
+        using var readCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var clientMessageTask = reader.ReadLineAsync(readCancellation.Token).AsTask();
+
+        while (!registration.Granted.IsCompleted)
+        {
+            using var waitCancellation =
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var stateChangeTask =
+                registration.ReadStateChangeAsync(waitCancellation.Token).AsTask();
+            var remainingWait = registration.GetRemainingWait(DateTimeOffset.UtcNow);
+            var timeoutTask = Task.Delay(
+                registration.IsPaused
+                    ? Timeout.InfiniteTimeSpan
+                    : remainingWait > TimeSpan.Zero
+                        ? remainingWait
+                        : TimeSpan.Zero,
+                waitCancellation.Token);
+            var first = await Task.WhenAny(
+                registration.Granted,
+                clientMessageTask,
+                stateChangeTask,
+                timeoutTask);
+
+            waitCancellation.Cancel();
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (first == timeoutTask)
+            {
+                _coordinator.Remove(requestId, registration.Request.LeaseName);
+                readCancellation.Cancel();
+                await ObserveCanceledReadAsync(clientMessageTask);
+                await WriteErrorAsync(
+                    writer,
+                    "wait_timeout",
+                    "Timed out waiting for a heavy-job grant.");
+                return;
+            }
+
+            if (first == clientMessageTask)
+            {
+                await HandlePreGrantMessageAsync(
+                    clientMessageTask.Result,
+                    registration,
+                    writer);
+                return;
+            }
+
+            if (first == stateChangeTask)
+            {
+                var stateChange = await stateChangeTask;
+                await WriteStateChangeAsync(
+                    writer,
+                    requestId,
+                    stateChange == QueueRegistrationState.Paused);
+            }
+        }
+
+        await writer.WriteLineAsync(Protocol.Serialize(new
+        {
+            version = Protocol.Version,
+            type = "grant",
+            requestId,
+            grantedAt = registration.ActivatedAt ?? DateTimeOffset.UtcNow
+        }));
+
+        var completion = Protocol.ParseClientMessage(await clientMessageTask);
+        if (completion.RequestId != requestId ||
+            !string.Equals(
+                completion.LeaseName,
+                registration.Request.LeaseName,
+                StringComparison.Ordinal))
+        {
+            throw new ProtocolException(
+                "request_id_mismatch",
+                "The completion does not match the active job lease.");
+        }
+
+        if (completion.Type == "cancel")
+        {
+            _coordinator.Remove(requestId, completion.LeaseName);
+            return;
+        }
+
+        if (completion.Type != "complete")
+        {
+            throw new ProtocolException(
+                "expected_completion",
+                "The active client must send a complete or cancel message.");
+        }
+
+        if (!_coordinator.Complete(requestId, completion.LeaseName!))
+        {
+            throw new ProtocolException(
+                "unknown_active_request",
+                "The active request could not be completed.");
+        }
+
+        await WriteAckAsync(writer, requestId);
     }
 
     private async Task HandlePreGrantMessageAsync(
         string? line,
-        Guid requestId,
+        QueueRegistration registration,
         StreamWriter writer)
     {
         if (line is null)
         {
-            _coordinator.Disconnect(requestId);
             return;
         }
 
-        try
+        var message = Protocol.ParseClientMessage(line);
+        if (message.Type != "cancel" ||
+            message.RequestId != registration.Request.RequestId ||
+            !string.Equals(
+                message.LeaseName,
+                registration.Request.LeaseName,
+                StringComparison.Ordinal))
         {
-            var message = Protocol.ParseClientMessage(line);
-            if (message.Type != "cancel" || message.RequestId != requestId)
-            {
-                throw new ProtocolException(
-                    "expected_cancel",
-                    "A waiting client may only cancel its own request.");
-            }
+            throw new ProtocolException(
+                "expected_cancel",
+                "A waiting client may only cancel its own request lease.");
+        }
 
-            _coordinator.Disconnect(requestId);
-        }
-        catch (ProtocolException exception)
+        _coordinator.Remove(message.RequestId, message.LeaseName);
+        await WriteAckAsync(writer, message.RequestId);
+    }
+
+    private async Task CompleteAsync(ClientMessage completion, StreamWriter writer)
+    {
+        if (!_coordinator.Complete(completion.RequestId, completion.LeaseName!))
         {
-            _coordinator.Disconnect(requestId);
-            await WriteErrorAsync(writer, exception.Code, exception.Message);
+            await WriteErrorAsync(
+                writer,
+                "unknown_active_request",
+                "No active or recently completed request matches this lease.");
+            return;
         }
+
+        await WriteAckAsync(writer, completion.RequestId);
+    }
+
+    private async Task CancelAsync(ClientMessage cancellation, StreamWriter writer)
+    {
+        if (!_coordinator.Remove(cancellation.RequestId, cancellation.LeaseName))
+        {
+            await WriteErrorAsync(
+                writer,
+                "unknown_request",
+                "No queued request matches this lease.");
+            return;
+        }
+
+        await WriteAckAsync(writer, cancellation.RequestId);
     }
 
     private async Task RunSchedulerAsync(CancellationToken cancellationToken)
     {
-        LegacyLockLease? activeLease = null;
-        Guid? activeLeaseOwnerId = null;
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                var state = _coordinator.Snapshot();
-                if (state.ActiveJobs.Count > 0)
+                if (_coordinator.Snapshot().ActiveJobs.Count > 0)
                 {
-                    if (activeLease is null)
-                    {
-                        var barrier = _coordinator.PeekActiveBarrier();
-                        if (barrier is null)
-                        {
-                            continue;
-                        }
-
-                        using var barrierCancellation =
-                            CancellationTokenSource.CreateLinkedTokenSource(
-                                cancellationToken,
-                                barrier.ActivePeriodEnded);
-                        try
-                        {
-                            var barrierLease = await _legacyLock.AcquireAsync(
-                                barrier.Request,
-                                barrierCancellation.Token);
-                            if (_coordinator.PeekActiveBarrier() is { } currentBarrier)
-                            {
-                                if (currentBarrier.Request.RequestId !=
-                                    barrier.Request.RequestId)
-                                {
-                                    await barrierLease.UpdateOwnerAsync(
-                                        currentBarrier.Request,
-                                        cancellationToken);
-                                }
-
-                                activeLease = barrierLease;
-                                activeLeaseOwnerId = currentBarrier.Request.RequestId;
-                            }
-                            else
-                            {
-                                barrierLease.Dispose();
-                            }
-                        }
-                        catch (OperationCanceledException)
-                            when (!cancellationToken.IsCancellationRequested)
-                        {
-                        }
-
-                        continue;
-                    }
-
-                    if (_coordinator.PeekActiveBarrier() is { } activeBarrier &&
-                        activeBarrier.Request.RequestId != activeLeaseOwnerId)
-                    {
-                        await activeLease.UpdateOwnerAsync(
-                            activeBarrier.Request,
-                            cancellationToken);
-                        activeLeaseOwnerId = activeBarrier.Request.RequestId;
-                    }
-
                     await _schedulerSignal.WaitAsync(cancellationToken);
                     continue;
                 }
-
-                activeLease?.Dispose();
-                activeLease = null;
-                activeLeaseOwnerId = null;
 
                 var candidate = _coordinator.PeekNext();
                 if (candidate is null)
@@ -404,50 +404,66 @@ public sealed class QueueBroker : IAsyncDisposable
                     continue;
                 }
 
-                using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken,
-                    candidate.SchedulingCanceled);
-
-                LegacyLockLease lease;
                 try
                 {
-                    lease = await _legacyLock.AcquireAsync(
-                        candidate.Request,
-                        linkedCancellation.Token);
+                    _coordinator.TryActivateNext(candidate.Request.RequestId);
                 }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                catch (Exception exception)
+                    when (exception is IOException or UnauthorizedAccessException)
                 {
-                    continue;
-                }
-
-                if (_coordinator.TryActivateNext(candidate.Request.RequestId))
-                {
-                    activeLease = lease;
-                    activeLeaseOwnerId = candidate.Request.RequestId;
-                }
-                else if (_coordinator.PeekActiveBarrier() is { } activeBarrier)
-                {
-                    await lease.UpdateOwnerAsync(activeBarrier.Request, cancellationToken);
-                    activeLease = lease;
-                    activeLeaseOwnerId = activeBarrier.Request.RequestId;
-                }
-                else
-                {
-                    lease.Dispose();
+                    await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
                 }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
-        finally
+    }
+
+    private async Task RunLeaseMonitorAsync(CancellationToken cancellationToken)
+    {
+        try
         {
-            activeLease?.Dispose();
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    _coordinator.RemoveExpiredDisconnectedLeases();
+                }
+                catch (Exception exception)
+                    when (exception is IOException or UnauthorizedAccessException)
+                {
+                }
+                await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
     }
 
     private void CoordinatorChanged(object? sender, EventArgs eventArgs) =>
         _schedulerSignal.Release();
+
+    private static Task WriteStateChangeAsync(
+        StreamWriter writer,
+        Guid requestId,
+        bool isPaused) =>
+        writer.WriteLineAsync(Protocol.Serialize(new
+        {
+            version = Protocol.Version,
+            type = isPaused ? "paused" : "resumed",
+            requestId,
+            changedAt = DateTimeOffset.UtcNow
+        }));
+
+    private static Task WriteAckAsync(StreamWriter writer, Guid requestId) =>
+        writer.WriteLineAsync(Protocol.Serialize(new
+        {
+            version = Protocol.Version,
+            type = "ack",
+            requestId
+        }));
 
     private static Task WriteErrorAsync(StreamWriter writer, string code, string message) =>
         writer.WriteLineAsync(Protocol.Serialize(new
@@ -483,6 +499,24 @@ public sealed class QueueBroker : IAsyncDisposable
         }
         catch (IOException)
         {
+        }
+    }
+
+    private sealed class SafeStreamWriter(
+        Stream stream,
+        Encoding encoding,
+        bool leaveOpen)
+        : StreamWriter(stream, encoding, bufferSize: 1024, leaveOpen)
+    {
+        protected override void Dispose(bool disposing)
+        {
+            try
+            {
+                base.Dispose(disposing);
+            }
+            catch (IOException)
+            {
+            }
         }
     }
 }

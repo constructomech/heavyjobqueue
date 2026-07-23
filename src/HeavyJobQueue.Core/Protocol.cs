@@ -5,8 +5,8 @@ namespace HeavyJobQueue.Core;
 
 public static class Protocol
 {
-    public const int Version = 1;
-    public const string PipeName = "GitHubCopilot.HeavyJobQueue.v1";
+    public const int Version = 2;
+    public const string PipeName = "GitHubCopilot.HeavyJobQueue.v2";
     public const int MaximumMessageLength = 65_536;
 
     public static ClientMessage ParseClientMessage(string? line)
@@ -68,6 +68,7 @@ public static class Protocol
         var callerPid = GetRequiredInt32(root, "callerPid");
         var cwd = GetRequiredString(root, "cwd");
         var command = GetOptionalString(root, "command");
+        var leaseName = GetRequiredLeaseName(root, requestId);
         var enqueuedAtText = GetRequiredString(root, "enqueuedAt");
         var waitTimeoutSeconds = GetRequiredInt32(root, "waitTimeoutSeconds");
 
@@ -117,6 +118,7 @@ public static class Protocol
             enqueuedAt,
             TimeSpan.FromSeconds(waitTimeoutSeconds),
             command,
+            leaseName,
             null,
             null,
             null);
@@ -128,6 +130,7 @@ public static class Protocol
         var succeeded = GetRequiredBoolean(root, "succeeded");
         var exitCode = GetRequiredInt32(root, "exitCode");
         var error = GetOptionalString(root, "error");
+        var leaseName = GetRequiredLeaseName(root, requestId);
 
         return new ClientMessage(
             version,
@@ -139,25 +142,44 @@ public static class Protocol
             null,
             null,
             null,
+            leaseName,
             succeeded,
             exitCode,
             error);
     }
 
-    private static ClientMessage ParseCancel(JsonElement root, int version, string type) =>
-        new(
+    private static ClientMessage ParseCancel(JsonElement root, int version, string type)
+    {
+        var requestId = GetRequiredGuid(root, "requestId");
+        return new(
             version,
             type,
-            GetRequiredGuid(root, "requestId"),
+            requestId,
             null,
             null,
             null,
             null,
             null,
             null,
+            GetRequiredLeaseName(root, requestId),
             null,
             null,
             GetOptionalString(root, "reason"));
+    }
+
+    private static string GetRequiredLeaseName(JsonElement root, Guid requestId)
+    {
+        var leaseName = GetRequiredString(root, "leaseName");
+        var expected = RequestLease.GetName(requestId);
+        if (!string.Equals(leaseName, expected, StringComparison.Ordinal))
+        {
+            throw new ProtocolException(
+                "invalid_lease",
+                $"'leaseName' must be '{expected}'.");
+        }
+
+        return leaseName;
+    }
 
     private static string GetRequiredString(JsonElement root, string propertyName)
     {
@@ -242,6 +264,7 @@ public sealed record ClientMessage(
     DateTimeOffset? EnqueuedAt,
     TimeSpan? WaitTimeout,
     string? Command,
+    string? LeaseName,
     bool? Succeeded,
     int? ExitCode,
     string? Error);

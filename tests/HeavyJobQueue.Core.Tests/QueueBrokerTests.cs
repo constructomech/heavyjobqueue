@@ -3,6 +3,7 @@ using HeavyJobQueue.Core;
 namespace HeavyJobQueue.Core.Tests;
 
 [TestClass]
+[DoNotParallelize]
 public sealed class QueueBrokerTests
 {
     [TestMethod]
@@ -16,7 +17,9 @@ public sealed class QueueBrokerTests
             {
                 SynchronizationContext.SetSynchronizationContext(
                     new NonPumpingSynchronizationContext());
-                var broker = new QueueBroker(new QueueCoordinator(), new LegacyLock());
+                var broker = new QueueBroker(
+                    new QueueCoordinator(),
+                    $"{Protocol.PipeName}.Tests.{Guid.NewGuid():N}");
                 broker.Start();
                 broker.DisposeAsync().AsTask().GetAwaiter().GetResult();
             }

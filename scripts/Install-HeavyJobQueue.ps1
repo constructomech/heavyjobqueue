@@ -26,6 +26,9 @@ $installedInstructions = Join-Path $instructionsDirectory "heavy-job-queue.instr
 $executablePath = Join-Path $installDirectory "HeavyJobQueue.exe"
 $obsoleteSingleFilePath = Join-Path $toolsDirectory "HeavyJobQueue.exe"
 $legacyExecutablePath = Join-Path $legacyInstallDirectory "HeavyJobQueue.exe"
+$legacyLockDirectory = Join-Path $env:LOCALAPPDATA "GitHubCopilot\locks"
+$legacyLockPath = Join-Path $legacyLockDirectory "heavy-job.lock"
+$legacyOwnerPath = Join-Path $legacyLockDirectory "heavy-job.owner.json"
 $runKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $runValueName = "GitHubCopilotHeavyJobQueue"
 $transactionId = [Guid]::NewGuid().ToString("N")
@@ -100,9 +103,11 @@ try {
     if (Test-Path -LiteralPath $obsoleteSingleFilePath) {
         Remove-Item -LiteralPath $obsoleteSingleFilePath -Force
     }
-    if (Test-Path -LiteralPath $legacyInstallDirectory) {
+    if (Test-Path -LiteralPath $legacyExecutablePath) {
         Remove-Item -LiteralPath $legacyInstallDirectory -Recurse -Force
     }
+    Remove-Item -LiteralPath $legacyLockPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $legacyOwnerPath -Force -ErrorAction SilentlyContinue
 
     if (-not $SkipInstructions) {
         [IO.Directory]::CreateDirectory($instructionsDirectory) | Out-Null

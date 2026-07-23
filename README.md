@@ -2,25 +2,28 @@
 
 Heavy Job Queue is a per-user Windows tray application that serializes expensive
 developer jobs across terminals and Copilot sessions. It replaces an invisible
-file-lock wait with a visible FIFO queue whose waiting jobs can be reordered.
+wait with a visible FIFO queue whose waiting jobs can be reordered.
 
 ## How it works
 
 - `HeavyJobQueue.exe` is the single-instance queue broker and WPF tray UI.
 - `scripts\Invoke-HeavyJob.ps1` submits a job over a current-user-only named
   pipe using a versioned newline-delimited JSON protocol.
-- The wrapper stays connected while queued. Once granted, it executes the
+- The wrapper owns a per-request named lease and stays connected while queued.
+  Once granted, it executes the
   scriptblock in the **calling PowerShell process**, preserving the caller's
   current directory, environment, functions, and toolchain setup.
-- A disconnected waiting client is removed automatically. A disconnected active
-  client releases the slot.
-- Before granting a job, the broker exclusively opens
-  `%LOCALAPPDATA%\GitHubCopilot\locks\heavy-job.lock` and writes compatible
-  `heavy-job.owner.json` metadata. This prevents overlap with legacy wrappers
-  during rollout.
+- Queue order, pause state, active grants, timeout accounting, and recent
+  completions are atomically persisted at
+  `%LOCALAPPDATA%\GitHubCopilot\HeavyJobQueue\queue-state.json`.
+- After a broker restart, waiting wrappers reconnect with their stable request
+  IDs. Active jobs continue in their caller processes, and their named leases
+  keep automatic grants blocked until they report completion or exit.
+- A disconnected request is removed only after its wrapper lease ends.
 
-The broker never bypasses the named pipe or legacy lock. If the broker is not
-running, the wrapper exits with a clear error.
+The broker never bypasses the named pipe. A new invocation exits with a clear
+error when the broker is unavailable; a request already accepted by the broker
+waits for it to restart and reclaims its durable entry.
 
 ## Requirements
 
@@ -50,6 +53,11 @@ installer from the repository:
 ```powershell
 .\scripts\Install-HeavyJobQueue.ps1
 ```
+
+For the one-time upgrade from protocol v1, wait until the old queue is completely
+idle before exiting it. Protocol-v1 wrappers do not own recoverable request
+leases. After protocol v2 is installed, accepted jobs survive ordinary broker
+restarts and subsequent upgrades.
 
 This publishes a framework-dependent application to
 `$HOME\.copilot\tools\HeavyJobQueue\HeavyJobQueue.exe`, installs the replacement wrapper at
@@ -108,11 +116,9 @@ time. Select a waiting row and use **Move up** or **Move down**.
 
 **Run now** is an explicit manual override for times when you judge that the
 machine can handle concurrent work. After confirmation, the selected waiter is
-granted immediately, even when another broker or legacy job is active. You may
+granted immediately, even when another job is active. You may
 approve multiple overrides. Automatic FIFO grants remain blocked until every
-active and overridden job finishes. The broker acquires or retains the legacy
-lock as a barrier when possible, but an override intentionally does not wait for
-an external legacy lock holder.
+active and overridden job finishes.
 
 **Pause / resume** moves a selected waiter to or from a paused section at the
 bottom of the queue. New jobs and unpaused waiters pass paused jobs. Resuming
@@ -120,8 +126,7 @@ appends the job behind current waiters but ahead of jobs that remain paused.
 Time spent paused does not count against the wrapper's queue wait timeout.
 
 Hover over an active, waiting, or paused row to see the complete PowerShell
-scriptblock text submitted by current wrappers. Older protocol-v1 wrappers that
-did not send command metadata remain compatible and show a placeholder.
+scriptblock text submitted by the wrapper.
 
 The queue window also includes Task Manager-style 60-second utilization history:
 one graph per logical processor plus physical-memory usage. Sampling uses native
@@ -130,32 +135,32 @@ packages or an elevated process.
 
 ## Protocol and security
 
-Protocol v1 uses the named pipe `GitHubCopilot.HeavyJobQueue.v1` with
+Protocol v2 uses the named pipe `GitHubCopilot.HeavyJobQueue.v2` with
 `PipeOptions.CurrentUserOnly`. Each UTF-8 line is one JSON object. Clients send:
 
 1. `enqueue` with a stable request ID, label, PID, current directory, enqueue
-   timestamp, and wait timeout.
+   timestamp, wait timeout, and per-request named lease.
 2. `complete` after the caller-process scriptblock finishes, or `cancel` while
    waiting.
 
 The broker responds with `queued`, `grant`, `ack`, or an explicit `error`.
 Malformed messages, unsupported versions, invalid fields, and unexpected state
-transitions are rejected.
+transitions are rejected. The queue-state snapshot is written through a
+same-volume temporary file and atomically replaced; the previous valid snapshot
+is retained as a backup.
 
 ## Troubleshooting
 
 **Broker unavailable**: Start
 `$HOME\.copilot\tools\HeavyJobQueue\HeavyJobQueue.exe` and retry.
 
-**A job remains blocked by a legacy process**: Inspect
-`%LOCALAPPDATA%\GitHubCopilot\locks\heavy-job.owner.json`. The broker waits for
-the legacy exclusive lock; it does not bypass it.
-
 **Upgrade cannot replace files**: Exit Heavy Job Queue from its tray menu, then
 rerun the installer.
 
 **Queue timeout**: Increase `-TimeoutMinutes`. Closing or interrupting the
-wrapper disconnects it and removes its queue entry.
+wrapper releases its named lease, after which the broker removes its queue
+entry. Time spent paused does not count against the timeout, including across a
+broker restart.
 
 ## License
 

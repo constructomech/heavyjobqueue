@@ -13,12 +13,80 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$protocolVersion = 1
-$pipeName = "GitHubCopilot.HeavyJobQueue.v1"
+$protocolVersion = 2
+$pipeName = "GitHubCopilot.HeavyJobQueue.v2"
 $requestId = [Guid]::NewGuid()
+$leaseName = "Local\GitHubCopilot.HeavyJobQueue.Lease.$($requestId.ToString('D'))"
+$leaseMutex = [Threading.Mutex]::new($false, $leaseName)
 $pipe = $null
 $reader = $null
 $writer = $null
+
+function Close-BrokerConnection {
+    if ($null -ne $writer) {
+        try {
+            $writer.Dispose()
+        }
+        catch [IO.IOException] {
+        }
+        $script:writer = $null
+    }
+    if ($null -ne $reader) {
+        try {
+            $reader.Dispose()
+        }
+        catch [IO.IOException] {
+        }
+        $script:reader = $null
+    }
+    if ($null -ne $pipe) {
+        try {
+            $pipe.Dispose()
+        }
+        catch [IO.IOException] {
+        }
+        $script:pipe = $null
+    }
+}
+
+function Connect-Broker {
+    param(
+        [int] $TimeoutMilliseconds = 2000
+    )
+
+    Close-BrokerConnection
+    $newPipe = [IO.Pipes.NamedPipeClientStream]::new(
+        ".",
+        $pipeName,
+        [IO.Pipes.PipeDirection]::InOut,
+        [IO.Pipes.PipeOptions]::Asynchronous
+    )
+
+    try {
+        $newPipe.Connect($TimeoutMilliseconds)
+        $script:pipe = $newPipe
+        $script:reader = [IO.StreamReader]::new(
+            $pipe,
+            [Text.UTF8Encoding]::new($false, $true),
+            $false,
+            1024,
+            $true
+        )
+        $script:writer = [IO.StreamWriter]::new(
+            $pipe,
+            [Text.UTF8Encoding]::new($false),
+            1024,
+            $true
+        )
+        $writer.NewLine = "`n"
+        $writer.AutoFlush = $true
+    }
+    catch {
+        $newPipe.Dispose()
+        Close-BrokerConnection
+        throw
+    }
+}
 
 function Read-BrokerMessage {
     param(
@@ -28,12 +96,14 @@ function Read-BrokerMessage {
 
     $readTask = $reader.ReadLineAsync()
     if (-not $readTask.Wait($Timeout)) {
-        throw "Timed out waiting for a response from the Heavy Job Queue broker."
+        throw [TimeoutException]::new(
+            "Timed out waiting for a response from the Heavy Job Queue broker.")
     }
 
     $line = $readTask.GetAwaiter().GetResult()
     if ($null -eq $line) {
-        throw "The Heavy Job Queue broker disconnected unexpectedly."
+        throw [IO.EndOfStreamException]::new(
+            "The Heavy Job Queue broker disconnected.")
     }
 
     try {
@@ -74,37 +144,43 @@ function Assert-BrokerMessage {
     }
 }
 
+function Send-Enqueue {
+    $writer.WriteLine(($enqueue | ConvertTo-Json -Compress))
+}
+
+function Reconnect-Waiting {
+    while ($isPaused -or [DateTimeOffset]::UtcNow -lt $deadline) {
+        try {
+            Connect-Broker
+            Send-Enqueue
+            return
+        }
+        catch {
+            Close-BrokerConnection
+            Start-Sleep -Milliseconds 500
+        }
+    }
+
+    throw "Timed out while reconnecting to the Heavy Job Queue broker."
+}
+
+function Send-Cancel {
+    $cancel = [ordered] @{
+        version = $protocolVersion
+        type = "cancel"
+        requestId = $requestId.ToString("D")
+        leaseName = $leaseName
+        reason = "wait_timeout"
+    }
+    $writer.WriteLine(($cancel | ConvertTo-Json -Compress))
+}
+
+if (-not $leaseMutex.WaitOne(0)) {
+    $leaseMutex.Dispose()
+    throw "Could not acquire the unique heavy-job request lease."
+}
+
 try {
-    $pipe = [IO.Pipes.NamedPipeClientStream]::new(
-        ".",
-        $pipeName,
-        [IO.Pipes.PipeDirection]::InOut,
-        [IO.Pipes.PipeOptions]::Asynchronous
-    )
-
-    try {
-        $pipe.Connect(5000)
-    }
-    catch {
-        throw "Heavy Job Queue broker is unavailable. Start HeavyJobQueue.exe and retry. $($_.Exception.Message)"
-    }
-
-    $reader = [IO.StreamReader]::new(
-        $pipe,
-        [Text.UTF8Encoding]::new($false, $true),
-        $false,
-        1024,
-        $true
-    )
-    $writer = [IO.StreamWriter]::new(
-        $pipe,
-        [Text.UTF8Encoding]::new($false),
-        1024,
-        $true
-    )
-    $writer.NewLine = "`n"
-    $writer.AutoFlush = $true
-
     $enqueueTime = [DateTimeOffset]::UtcNow
     $deadline = $enqueueTime.AddMinutes($TimeoutMinutes)
     $enqueue = [ordered] @{
@@ -117,22 +193,25 @@ try {
         command = $Job.ToString()
         enqueuedAt = $enqueueTime.ToString("o")
         waitTimeoutSeconds = $TimeoutMinutes * 60
+        leaseName = $leaseName
     }
-    $writer.WriteLine(($enqueue | ConvertTo-Json -Compress))
+
+    try {
+        Connect-Broker -TimeoutMilliseconds 5000
+        Send-Enqueue
+    }
+    catch {
+        throw "Heavy Job Queue broker is unavailable. Start HeavyJobQueue.exe and retry. $($_.Exception.Message)"
+    }
 
     $granted = $false
     $isPaused = $false
     $pausedAt = $null
+    $reportedReconnect = $false
     while (-not $granted) {
         $remaining = $deadline - [DateTimeOffset]::UtcNow
         if (-not $isPaused -and $remaining -le [TimeSpan]::Zero) {
-            $cancel = [ordered] @{
-                version = $protocolVersion
-                type = "cancel"
-                requestId = $requestId.ToString("D")
-                reason = "wait_timeout"
-            }
-            $writer.WriteLine(($cancel | ConvertTo-Json -Compress))
+            Send-Cancel
             throw "Timed out waiting for the Heavy Job Queue grant."
         }
 
@@ -141,8 +220,27 @@ try {
         } else {
             $remaining
         }
-        $message = Read-BrokerMessage -Timeout $readTimeout
-        Assert-BrokerMessage -Message $message
+
+        try {
+            $message = Read-BrokerMessage -Timeout $readTimeout
+            Assert-BrokerMessage -Message $message
+        }
+        catch [TimeoutException] {
+            Send-Cancel
+            throw "Timed out waiting for the Heavy Job Queue grant."
+        }
+        catch [IO.IOException] {
+            if (-not $reportedReconnect) {
+                Write-Host "Heavy Job Queue broker restarted; reclaiming queued job: $Label"
+                $reportedReconnect = $true
+            }
+            Reconnect-Waiting
+            continue
+        }
+        catch [ObjectDisposedException] {
+            Reconnect-Waiting
+            continue
+        }
 
         switch ($message.type) {
             "queued" {
@@ -211,6 +309,7 @@ try {
         version = $protocolVersion
         type = "complete"
         requestId = $requestId.ToString("D")
+        leaseName = $leaseName
         succeeded = $null -eq $executionError
         exitCode = $jobExitCode
         error = if ($null -eq $executionError) {
@@ -224,16 +323,26 @@ try {
     }
 
     $reportError = $null
-    try {
-        $writer.WriteLine(($completion | ConvertTo-Json -Compress))
-        $ack = Read-BrokerMessage -Timeout ([TimeSpan]::FromSeconds(10))
-        Assert-BrokerMessage -Message $ack
-        if ($ack.type -ne "ack" -or $ack.requestId -ne $requestId.ToString("D")) {
-            throw "The Heavy Job Queue broker returned an invalid completion acknowledgement."
+    $reportDeadline = [DateTimeOffset]::UtcNow.AddMinutes(5)
+    while ([DateTimeOffset]::UtcNow -lt $reportDeadline) {
+        try {
+            if ($null -eq $writer) {
+                Connect-Broker
+            }
+            $writer.WriteLine(($completion | ConvertTo-Json -Compress))
+            $ack = Read-BrokerMessage -Timeout ([TimeSpan]::FromSeconds(10))
+            Assert-BrokerMessage -Message $ack
+            if ($ack.type -ne "ack" -or $ack.requestId -ne $requestId.ToString("D")) {
+                throw "The Heavy Job Queue broker returned an invalid completion acknowledgement."
+            }
+            $reportError = $null
+            break
         }
-    }
-    catch {
-        $reportError = $_
+        catch {
+            $reportError = $_
+            Close-BrokerConnection
+            Start-Sleep -Milliseconds 500
+        }
     }
 
     if ($null -ne $executionError) {
@@ -250,13 +359,7 @@ try {
     Write-Host "Heavy-job slot released: $Label"
 }
 finally {
-    if ($null -ne $writer) {
-        $writer.Dispose()
-    }
-    if ($null -ne $reader) {
-        $reader.Dispose()
-    }
-    if ($null -ne $pipe) {
-        $pipe.Dispose()
-    }
+    Close-BrokerConnection
+    $leaseMutex.ReleaseMutex()
+    $leaseMutex.Dispose()
 }

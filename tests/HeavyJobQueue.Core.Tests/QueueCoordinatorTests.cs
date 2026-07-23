@@ -17,7 +17,9 @@ public sealed class QueueCoordinatorTests
         Assert.IsTrue(first.Granted.IsCompletedSuccessfully);
         Assert.IsFalse(second.Granted.IsCompleted);
 
-        Assert.IsTrue(coordinator.Complete(first.Request.RequestId));
+        Assert.IsTrue(coordinator.Complete(
+            first.Request.RequestId,
+            first.Request.LeaseName));
         Assert.AreEqual(second.Request.RequestId, coordinator.PeekNext()!.Request.RequestId);
         Assert.IsTrue(coordinator.TryActivateNext(second.Request.RequestId));
         Assert.IsTrue(second.Granted.IsCompletedSuccessfully);
@@ -43,7 +45,7 @@ public sealed class QueueCoordinatorTests
     }
 
     [TestMethod]
-    public void DisconnectRemovesWaiterAndReleasesActiveJob()
+    public void ExplicitRemovalRemovesWaiterAndReleasesActiveJob()
     {
         var coordinator = new QueueCoordinator();
         var active = coordinator.Enqueue(CreateRequest("active"));
@@ -51,9 +53,9 @@ public sealed class QueueCoordinatorTests
         var next = coordinator.Enqueue(CreateRequest("next"));
         coordinator.TryActivateNext(active.Request.RequestId);
 
-        Assert.IsTrue(coordinator.Disconnect(disconnectedWaiter.Request.RequestId));
+        Assert.IsTrue(coordinator.Remove(disconnectedWaiter.Request.RequestId));
         Assert.IsTrue(disconnectedWaiter.Removed.IsCancellationRequested);
-        Assert.IsTrue(coordinator.Disconnect(active.Request.RequestId));
+        Assert.IsTrue(coordinator.Remove(active.Request.RequestId));
         Assert.IsTrue(active.Removed.IsCancellationRequested);
 
         Assert.AreEqual(next.Request.RequestId, coordinator.PeekNext()!.Request.RequestId);
@@ -81,16 +83,20 @@ public sealed class QueueCoordinatorTests
         Assert.HasCount(3, state.ActiveJobs);
         Assert.AreEqual(2, state.ActiveJobs.Count(job => job.IsManualOverride));
 
-        coordinator.Complete(active.Request.RequestId);
-        coordinator.Complete(firstOverride.Request.RequestId);
+        coordinator.Complete(active.Request.RequestId, active.Request.LeaseName);
+        coordinator.Complete(
+            firstOverride.Request.RequestId,
+            firstOverride.Request.LeaseName);
         Assert.IsNull(coordinator.PeekNext());
 
-        coordinator.Complete(secondOverride.Request.RequestId);
+        coordinator.Complete(
+            secondOverride.Request.RequestId,
+            secondOverride.Request.LeaseName);
         Assert.AreEqual(waiting.Request.RequestId, coordinator.PeekNext()!.Request.RequestId);
     }
 
     [TestMethod]
-    public void DisconnectingOverrideKeepsQueueBlockedByOtherActiveJobs()
+    public void RemovingOverrideKeepsQueueBlockedByOtherActiveJobs()
     {
         var coordinator = new QueueCoordinator();
         var active = coordinator.Enqueue(CreateRequest("active"));
@@ -99,36 +105,11 @@ public sealed class QueueCoordinatorTests
         coordinator.TryActivateNext(active.Request.RequestId);
         coordinator.RunNow(manualOverride.Request.RequestId);
 
-        Assert.IsTrue(coordinator.Disconnect(manualOverride.Request.RequestId));
+        Assert.IsTrue(coordinator.Remove(manualOverride.Request.RequestId));
         Assert.IsNull(coordinator.PeekNext());
 
-        coordinator.Complete(active.Request.RequestId);
+        coordinator.Complete(active.Request.RequestId, active.Request.LeaseName);
         Assert.AreEqual(waiting.Request.RequestId, coordinator.PeekNext()!.Request.RequestId);
-    }
-
-    [TestMethod]
-    public void ActiveBarrierEndsOnlyAfterAllOverridesFinish()
-    {
-        var coordinator = new QueueCoordinator();
-        var first = coordinator.Enqueue(CreateRequest("override-1"));
-        var second = coordinator.Enqueue(CreateRequest("override-2"));
-
-        coordinator.RunNow(first.Request.RequestId);
-        var barrier = coordinator.PeekActiveBarrier();
-        coordinator.RunNow(second.Request.RequestId);
-
-        Assert.IsNotNull(barrier);
-        Assert.IsFalse(barrier.ActivePeriodEnded.IsCancellationRequested);
-        Assert.IsTrue(first.SchedulingCanceled.IsCancellationRequested);
-
-        coordinator.Complete(first.Request.RequestId);
-        Assert.IsFalse(barrier.ActivePeriodEnded.IsCancellationRequested);
-        Assert.AreEqual(
-            second.Request.RequestId,
-            coordinator.PeekActiveBarrier()!.Request.RequestId);
-
-        coordinator.Complete(second.Request.RequestId);
-        Assert.IsTrue(barrier.ActivePeriodEnded.IsCancellationRequested);
     }
 
     [TestMethod]
@@ -169,13 +150,17 @@ public sealed class QueueCoordinatorTests
         Assert.IsTrue(coordinator.Snapshot().ActiveJobs.Single().IsManualOverride);
     }
 
-    private static JobRequest CreateRequest(string label) =>
-        new(
-            Guid.NewGuid(),
+    private static JobRequest CreateRequest(string label)
+    {
+        var requestId = Guid.NewGuid();
+        return new JobRequest(
+            requestId,
             label,
             Environment.ProcessId,
             Environment.CurrentDirectory,
             DateTimeOffset.UtcNow,
             TimeSpan.FromMinutes(5),
-            $"Write-Output '{label}'");
+            $"Write-Output '{label}'",
+            RequestLease.GetName(requestId));
+    }
 }

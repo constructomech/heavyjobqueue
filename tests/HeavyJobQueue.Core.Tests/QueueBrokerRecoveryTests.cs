@@ -109,6 +109,64 @@ public sealed class QueueBrokerRecoveryTests
         }
     }
 
+    [TestMethod]
+    public async Task ReconnectingClientIsToldTheQueueIsStillPausedAfterRestart()
+    {
+        var directory = CreateTemporaryDirectory();
+        var request = CreateRequest("held");
+        using var lease = new LeaseHolder(request.LeaseName);
+        try
+        {
+            var pipeName = $"{Protocol.PipeName}.Tests.{Guid.NewGuid():N}";
+            var store = new QueueStateStore(Path.Combine(directory, "queue-state.json"));
+            var firstCoordinator = new QueueCoordinator(store);
+            Assert.IsTrue(firstCoordinator.PauseAll());
+            await using (var firstBroker = new QueueBroker(firstCoordinator, pipeName))
+            {
+                firstBroker.Start();
+                await using var client = await BrokerClient.ConnectAsync(pipeName);
+                await client.SendAsync(CreateEnqueue(request));
+                Assert.AreEqual(
+                    "queued",
+                    (await client.ReadAsync()).GetProperty("type").GetString());
+                Assert.AreEqual(
+                    "paused",
+                    (await client.ReadAsync()).GetProperty("type").GetString());
+            }
+
+            var restoredCoordinator = new QueueCoordinator(store);
+            Assert.IsTrue(restoredCoordinator.IsQueuePaused);
+            await using var restoredBroker = new QueueBroker(restoredCoordinator, pipeName);
+            restoredBroker.Start();
+
+            await using var reconnected = await BrokerClient.ConnectAsync(pipeName);
+            await reconnected.SendAsync(CreateEnqueue(request));
+            Assert.AreEqual(
+                "queued",
+                (await reconnected.ReadAsync()).GetProperty("type").GetString());
+            Assert.AreEqual(
+                "paused",
+                (await reconnected.ReadAsync()).GetProperty("type").GetString());
+
+            Assert.IsTrue(restoredCoordinator.ResumeAll());
+
+            var received = new List<string>();
+            string? type;
+            do
+            {
+                type = (await reconnected.ReadAsync()).GetProperty("type").GetString();
+                received.Add(type!);
+            }
+            while (type != "grant");
+
+            CollectionAssert.Contains(received, "resumed");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static string CreateEnqueue(JobRequest request) =>
         Protocol.Serialize(new
         {

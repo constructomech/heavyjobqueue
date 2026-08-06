@@ -326,6 +326,76 @@ public sealed class QueueCoordinatorTests
             $"Queue-paused time counted against the wait timeout ({remaining}).");
     }
 
+    [TestMethod]
+    public void PauseAllRejectsAGrantCandidateTakenBeforeTheHold()
+    {
+        var coordinator = new QueueCoordinator();
+        var candidate = coordinator.Enqueue(CreateRequest("candidate"));
+        var next = coordinator.Enqueue(CreateRequest("next"));
+        var peeked = coordinator.PeekNext();
+        Assert.AreEqual(candidate.Request.RequestId, peeked!.Request.RequestId);
+
+        Assert.IsTrue(coordinator.PauseAll());
+
+        Assert.IsFalse(coordinator.TryActivateNext(peeked.Request.RequestId));
+        Assert.IsFalse(candidate.Granted.IsCompleted);
+        Assert.IsTrue(candidate.SchedulingCanceled.IsCancellationRequested);
+        Assert.IsTrue(candidate.IsPaused);
+        Assert.IsTrue(candidate.IsPausedByQueue);
+        Assert.IsNull(coordinator.PeekNext());
+
+        var state = coordinator.Snapshot();
+        Assert.IsEmpty(state.ActiveJobs);
+        CollectionAssert.AreEqual(
+            new[] { candidate.Request.RequestId, next.Request.RequestId },
+            state.Waiting.Select(job => job.RequestId).ToArray());
+        Assert.IsTrue(state.Waiting.All(job => job.Status == JobStatus.Paused));
+
+        Assert.IsTrue(coordinator.ResumeAll());
+        Assert.AreEqual(candidate.Request.RequestId, coordinator.PeekNext()!.Request.RequestId);
+        Assert.IsTrue(coordinator.TryActivateNext(candidate.Request.RequestId));
+        Assert.IsTrue(candidate.Granted.IsCompletedSuccessfully);
+    }
+
+    [TestMethod]
+    public async Task RepeatedPauseAllAndResumeAllLeaveHeldJobsUntouched()
+    {
+        var coordinator = new QueueCoordinator();
+        var held = coordinator.Enqueue(CreateRequest("held"));
+        var pausedState = held.ReadStateChangeAsync(CancellationToken.None).AsTask();
+
+        Assert.IsTrue(coordinator.PauseAll());
+        Assert.AreEqual(QueueRegistrationState.Paused, await pausedState);
+        var pausedAt = held.PausedAt;
+        var pausedDuration = held.TotalPausedDuration;
+
+        Assert.IsFalse(coordinator.PauseAll());
+        Assert.IsTrue(coordinator.IsQueuePaused);
+        Assert.IsTrue(held.IsPaused);
+        Assert.AreEqual(pausedAt, held.PausedAt);
+        Assert.AreEqual(pausedDuration, held.TotalPausedDuration);
+
+        Assert.IsTrue(coordinator.ResumeAll());
+        // A duplicate hold would have queued a second Paused change ahead of this one.
+        Assert.AreEqual(
+            QueueRegistrationState.Resumed,
+            await held.ReadStateChangeAsync(CancellationToken.None));
+        var resumedDuration = held.TotalPausedDuration;
+
+        Assert.IsFalse(coordinator.ResumeAll());
+        Assert.IsFalse(coordinator.IsQueuePaused);
+        Assert.IsFalse(held.IsPaused);
+        Assert.IsNull(held.PausedAt);
+        Assert.AreEqual(resumedDuration, held.TotalPausedDuration);
+
+        Assert.IsTrue(coordinator.PauseAll());
+        // Likewise, a duplicate release would have queued a second Resumed change.
+        Assert.AreEqual(
+            QueueRegistrationState.Paused,
+            await held.ReadStateChangeAsync(CancellationToken.None));
+        Assert.AreEqual(resumedDuration, held.TotalPausedDuration);
+    }
+
     private static JobRequest CreateRequest(string label)
     {
         var requestId = Guid.NewGuid();

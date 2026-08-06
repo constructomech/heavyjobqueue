@@ -116,14 +116,32 @@ public partial class MainWindow : Window
         Select(row.RequestId);
     }
 
+    private void PauseAll_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        if (_coordinator.IsQueuePaused)
+        {
+            _coordinator.ResumeAll();
+        }
+        else
+        {
+            _coordinator.PauseAll();
+        }
+    }
+
     private void QueueChanged(object? sender, EventArgs eventArgs) =>
         Dispatcher.BeginInvoke(RefreshQueueState);
 
     private void RefreshQueueState()
     {
         var state = _coordinator.Snapshot();
+        var isQueuePaused = _coordinator.IsQueuePaused;
         var now = DateTimeOffset.UtcNow;
         var selectedId = (WaitingGrid.SelectedItem as WaitingRow)?.RequestId;
+
+        QueuePausedBanner.Visibility = isQueuePaused
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        PauseAllButton.Content = isQueuePaused ? "Resume all" : "Pause all";
 
         _activeRows.Clear();
         foreach (var job in state.ActiveJobs)
@@ -144,7 +162,7 @@ public partial class MainWindow : Window
             _waitingRows.Add(new WaitingRow(
                 job.RequestId,
                 index + 1,
-                job.Status == JobStatus.Paused ? "Paused" : "Waiting",
+                DescribeStatus(job),
                 job.Label,
                 job.CallerPid,
                 job.Cwd,
@@ -160,6 +178,13 @@ public partial class MainWindow : Window
             Select(selectedId.Value);
         }
     }
+
+    private static string DescribeStatus(JobSnapshot job) => job.Status switch
+    {
+        JobStatus.Paused when job.IsPausedByQueue => "Queue paused",
+        JobStatus.Paused => "Paused",
+        _ => "Waiting"
+    };
 
     private void TimerTick()
     {

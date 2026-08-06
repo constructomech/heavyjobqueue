@@ -13,8 +13,8 @@ wait with a visible FIFO queue whose waiting jobs can be reordered.
   Once granted, it executes the
   scriptblock in the **calling PowerShell process**, preserving the caller's
   current directory, environment, functions, and toolchain setup.
-- Queue order, pause state, active grants, timeout accounting, and recent
-  completions are atomically persisted at
+- Queue order, pause state (per job and queue-wide), active grants, timeout
+  accounting, and recent completions are atomically persisted at
   `%LOCALAPPDATA%\GitHubCopilot\HeavyJobQueue\queue-state.json`.
 - After a broker restart, waiting wrappers reconnect with their stable request
   IDs. Active jobs continue in their caller processes, and their named leases
@@ -110,9 +110,10 @@ The optional third argument is the queue wait timeout in minutes and defaults to
 } -TimeoutMinutes 30
 ```
 
-The tray menu opens the queue window or exits the broker. The window shows all
-active jobs and waiters with label, process ID, working directory, and elapsed
-time. Select a waiting row and use **Move up** or **Move down**.
+The tray menu opens the queue window, pauses or resumes the whole queue, or
+exits the broker. The window shows all active jobs and waiters with label,
+process ID, working directory, and elapsed time. Select a waiting row and use
+**Move up** or **Move down**.
 
 **Run now** is an explicit manual override for times when you judge that the
 machine can handle concurrent work. The selected waiter is granted immediately
@@ -124,6 +125,21 @@ active and overridden job finishes.
 bottom of the queue. New jobs and unpaused waiters pass paused jobs. Resuming
 appends the job behind current waiters but ahead of jobs that remain paused.
 Time spent paused does not count against the wrapper's queue wait timeout.
+
+**Pause all / Resume all** holds the entire queue. Every current waiter and
+every job that arrives afterwards is paused until you resume, and a banner
+across the top of the window shows that the queue is held. Active jobs are
+untouched and keep running to completion; when one finishes, no waiter is
+granted. Held wrappers are told they are paused, so a queued session reports
+why it is waiting instead of appearing to hang.
+
+Two operator overrides still work while the queue is paused: **Run now** grants
+the selected job immediately, and resuming a single waiter exempts just that job
+so it can run under the normal FIFO rules. Pausing an exempted job returns it to
+the queue-wide hold. Jobs you paused individually stay paused through
+**Resume all**; the `Status` column distinguishes `Queue paused` from `Paused`.
+As with individual pause, time spent globally paused does not count against the
+wrapper's wait timeout, and the paused queue is restored after a broker restart.
 
 Hover over an active, waiting, or paused row to see the complete PowerShell
 scriptblock text submitted by the wrapper.

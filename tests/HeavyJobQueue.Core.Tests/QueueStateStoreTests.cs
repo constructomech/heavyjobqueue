@@ -139,6 +139,128 @@ public sealed class QueueStateStoreTests
         }
     }
 
+    [TestMethod]
+    public void QueuePauseSurvivesRestart()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var store = new QueueStateStore(Path.Combine(directory, "queue-state.json"));
+            var coordinator = new QueueCoordinator(store);
+            var individual = coordinator.Enqueue(CreateRequest("individual"));
+            var held = coordinator.Enqueue(CreateRequest("held"));
+            coordinator.Pause(individual.Request.RequestId);
+            Assert.IsTrue(coordinator.PauseAll());
+
+            var restored = new QueueCoordinator(store);
+
+            Assert.IsTrue(restored.IsQueuePaused);
+            Assert.IsTrue(restored.Snapshot().Waiting.All(job =>
+                job.Status == JobStatus.Paused));
+            Assert.IsNull(restored.PeekNext());
+
+            var arrival = restored.Enqueue(CreateRequest("arrival"));
+            Assert.IsTrue(arrival.IsPaused);
+            Assert.IsNull(restored.PeekNext());
+
+            Assert.IsTrue(restored.ResumeAll());
+            var state = restored.Snapshot();
+            Assert.AreEqual(
+                JobStatus.Paused,
+                state.Waiting.Single(job => job.RequestId == individual.Request.RequestId).Status);
+            Assert.AreEqual(
+                JobStatus.Waiting,
+                state.Waiting.Single(job => job.RequestId == held.Request.RequestId).Status);
+            Assert.AreEqual(
+                arrival.Request.RequestId,
+                state.Waiting.Single(job => job.RequestId == arrival.Request.RequestId).RequestId);
+            Assert.IsFalse(arrival.IsPaused);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public void LoadsStateWrittenBeforeQueuePauseExisted()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var statePath = Path.Combine(directory, "queue-state.json");
+            var waitingId = Guid.NewGuid();
+            var pausedId = Guid.NewGuid();
+            var waitingLease = JsonEscape(RequestLease.GetName(waitingId));
+            var pausedLease = JsonEscape(RequestLease.GetName(pausedId));
+            File.WriteAllText(statePath, $$"""
+                {
+                  "version": 1,
+                  "jobs": [
+                    {
+                      "requestId": "{{waitingId}}",
+                      "label": "waiting",
+                      "callerPid": 1234,
+                      "cwd": "C:\\src",
+                      "enqueuedAt": "2026-01-01T00:00:00+00:00",
+                      "waitTimeout": "00:05:00",
+                      "command": "Write-Output 'waiting'",
+                      "leaseName": "{{waitingLease}}",
+                      "activatedAt": null,
+                      "status": 0,
+                      "isManualOverride": false,
+                      "pausedAt": null,
+                      "totalPausedDuration": "00:00:00"
+                    },
+                    {
+                      "requestId": "{{pausedId}}",
+                      "label": "paused",
+                      "callerPid": 1235,
+                      "cwd": "C:\\src",
+                      "enqueuedAt": "2026-01-01T00:00:00+00:00",
+                      "waitTimeout": "00:05:00",
+                      "command": "Write-Output 'paused'",
+                      "leaseName": "{{pausedLease}}",
+                      "activatedAt": null,
+                      "status": 1,
+                      "isManualOverride": false,
+                      "pausedAt": "2026-01-01T00:01:00+00:00",
+                      "totalPausedDuration": "00:00:30"
+                    }
+                  ],
+                  "completions": []
+                }
+                """);
+
+            var coordinator = new QueueCoordinator(new QueueStateStore(statePath));
+
+            Assert.IsFalse(coordinator.IsQueuePaused);
+            var state = coordinator.Snapshot();
+            CollectionAssert.AreEqual(
+                new[] { waitingId, pausedId },
+                state.Waiting.Select(job => job.RequestId).ToArray());
+            Assert.AreEqual(JobStatus.Waiting, state.Waiting[0].Status);
+            Assert.AreEqual(JobStatus.Paused, state.Waiting[1].Status);
+            Assert.IsFalse(state.Waiting[1].IsPausedByQueue);
+
+            Assert.IsTrue(coordinator.PauseAll());
+            Assert.IsTrue(coordinator.ResumeAll());
+            var resumed = coordinator.Snapshot();
+            Assert.AreEqual(
+                JobStatus.Waiting,
+                resumed.Waiting.Single(job => job.RequestId == waitingId).Status);
+            Assert.AreEqual(
+                JobStatus.Paused,
+                resumed.Waiting.Single(job => job.RequestId == pausedId).Status);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static string JsonEscape(string value) => value.Replace("\\", "\\\\");
+
     private static string CreateTemporaryDirectory()
     {
         var directory = Path.Combine(

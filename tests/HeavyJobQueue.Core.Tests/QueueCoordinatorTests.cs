@@ -150,6 +150,182 @@ public sealed class QueueCoordinatorTests
         Assert.IsTrue(coordinator.Snapshot().ActiveJobs.Single().IsManualOverride);
     }
 
+    [TestMethod]
+    public async Task PauseAllHoldsCurrentWaitersAndNotifiesThem()
+    {
+        var coordinator = new QueueCoordinator();
+        var first = coordinator.Enqueue(CreateRequest("first"));
+        var second = coordinator.Enqueue(CreateRequest("second"));
+        var firstState = first.ReadStateChangeAsync(CancellationToken.None).AsTask();
+        var secondState = second.ReadStateChangeAsync(CancellationToken.None).AsTask();
+
+        Assert.IsTrue(coordinator.PauseAll());
+        Assert.IsFalse(coordinator.PauseAll());
+
+        Assert.IsTrue(coordinator.IsQueuePaused);
+        Assert.AreEqual(QueueRegistrationState.Paused, await firstState);
+        Assert.AreEqual(QueueRegistrationState.Paused, await secondState);
+        Assert.IsNull(coordinator.PeekNext());
+        CollectionAssert.AreEqual(
+            new[] { first.Request.RequestId, second.Request.RequestId },
+            coordinator.Snapshot().Waiting.Select(job => job.RequestId).ToArray());
+        Assert.IsTrue(coordinator.Snapshot().Waiting.All(job =>
+            job.Status == JobStatus.Paused && job.IsPausedByQueue));
+    }
+
+    [TestMethod]
+    public void JobEnqueuedWhileQueuePausedIsHeldUntilResumeAll()
+    {
+        var coordinator = new QueueCoordinator();
+        coordinator.PauseAll();
+
+        var arrival = coordinator.Enqueue(CreateRequest("arrival"));
+
+        Assert.IsTrue(arrival.IsPaused);
+        Assert.IsTrue(arrival.IsPausedByQueue);
+        Assert.IsTrue(arrival.SchedulingCanceled.IsCancellationRequested);
+        Assert.IsNull(coordinator.PeekNext());
+        Assert.AreEqual(JobStatus.Paused, coordinator.Snapshot().Waiting.Single().Status);
+
+        Assert.IsTrue(coordinator.ResumeAll());
+        Assert.IsFalse(coordinator.ResumeAll());
+
+        Assert.IsFalse(arrival.IsPaused);
+        Assert.AreEqual(
+            arrival.Request.RequestId,
+            coordinator.PeekNext()!.Request.RequestId);
+    }
+
+    [TestMethod]
+    public void ResumeAllLeavesIndividuallyPausedJobsPaused()
+    {
+        var coordinator = new QueueCoordinator();
+        var individual = coordinator.Enqueue(CreateRequest("individual"));
+        var held = coordinator.Enqueue(CreateRequest("held"));
+        Assert.IsTrue(coordinator.Pause(individual.Request.RequestId));
+        Assert.IsTrue(coordinator.PauseAll());
+        Assert.IsTrue(coordinator.ResumeAll());
+
+        Assert.IsFalse(coordinator.IsQueuePaused);
+        Assert.IsTrue(individual.IsPaused);
+        Assert.IsFalse(individual.IsPausedByQueue);
+        Assert.IsFalse(held.IsPaused);
+
+        var state = coordinator.Snapshot();
+        CollectionAssert.AreEqual(
+            new[] { held.Request.RequestId, individual.Request.RequestId },
+            state.Waiting.Select(job => job.RequestId).ToArray());
+        Assert.AreEqual(JobStatus.Paused, state.Waiting[^1].Status);
+        Assert.AreEqual(held.Request.RequestId, coordinator.PeekNext()!.Request.RequestId);
+    }
+
+    [TestMethod]
+    public void CompletingActiveJobWhileQueuePausedDoesNotGrantNextWaiter()
+    {
+        var coordinator = new QueueCoordinator();
+        var active = coordinator.Enqueue(CreateRequest("active"));
+        var waiting = coordinator.Enqueue(CreateRequest("waiting"));
+        coordinator.TryActivateNext(active.Request.RequestId);
+
+        Assert.IsTrue(coordinator.PauseAll());
+        Assert.AreEqual(
+            active.Request.RequestId,
+            coordinator.Snapshot().ActiveJobs.Single().RequestId);
+
+        Assert.IsTrue(coordinator.Complete(
+            active.Request.RequestId,
+            active.Request.LeaseName));
+        Assert.IsNull(coordinator.PeekNext());
+        Assert.IsFalse(coordinator.TryActivateNext(waiting.Request.RequestId));
+        Assert.IsFalse(waiting.Granted.IsCompleted);
+
+        Assert.IsTrue(coordinator.ResumeAll());
+        Assert.AreEqual(waiting.Request.RequestId, coordinator.PeekNext()!.Request.RequestId);
+    }
+
+    [TestMethod]
+    public void RunNowOverridesQueuePause()
+    {
+        var coordinator = new QueueCoordinator();
+        var waiter = coordinator.Enqueue(CreateRequest("waiter"));
+        var held = coordinator.Enqueue(CreateRequest("held"));
+        coordinator.PauseAll();
+
+        Assert.IsTrue(coordinator.RunNow(waiter.Request.RequestId));
+
+        Assert.IsTrue(waiter.Granted.IsCompletedSuccessfully);
+        Assert.IsFalse(waiter.IsPaused);
+        Assert.IsFalse(waiter.IsPausedByQueue);
+        Assert.IsTrue(coordinator.IsQueuePaused);
+        Assert.IsTrue(coordinator.Snapshot().ActiveJobs.Single().IsManualOverride);
+        Assert.IsTrue(held.IsPaused);
+        Assert.IsNull(coordinator.PeekNext());
+    }
+
+    [TestMethod]
+    public void ResumingSingleJobWhileQueuePausedExemptsItFromTheHold()
+    {
+        var coordinator = new QueueCoordinator();
+        var exempt = coordinator.Enqueue(CreateRequest("exempt"));
+        var held = coordinator.Enqueue(CreateRequest("held"));
+        coordinator.PauseAll();
+
+        Assert.IsTrue(coordinator.Resume(exempt.Request.RequestId));
+
+        Assert.IsTrue(coordinator.IsQueuePaused);
+        Assert.AreEqual(exempt.Request.RequestId, coordinator.PeekNext()!.Request.RequestId);
+        Assert.IsTrue(coordinator.TryActivateNext(exempt.Request.RequestId));
+        Assert.IsTrue(exempt.Granted.IsCompletedSuccessfully);
+        Assert.IsTrue(held.IsPaused);
+
+        Assert.IsTrue(coordinator.Complete(
+            exempt.Request.RequestId,
+            exempt.Request.LeaseName));
+        Assert.IsNull(coordinator.PeekNext());
+    }
+
+    [TestMethod]
+    public void PausingExemptedJobReturnsItToTheQueueHold()
+    {
+        var coordinator = new QueueCoordinator();
+        var job = coordinator.Enqueue(CreateRequest("job"));
+        coordinator.PauseAll();
+        Assert.IsTrue(coordinator.Resume(job.Request.RequestId));
+
+        Assert.IsTrue(coordinator.Pause(job.Request.RequestId));
+
+        Assert.IsTrue(job.IsPaused);
+        Assert.IsTrue(job.IsPausedByQueue);
+        Assert.IsNull(coordinator.PeekNext());
+
+        Assert.IsTrue(coordinator.ResumeAll());
+        Assert.IsFalse(job.IsPaused);
+        Assert.AreEqual(job.Request.RequestId, coordinator.PeekNext()!.Request.RequestId);
+    }
+
+    [TestMethod]
+    public void QueuePausedTimeDoesNotCountAgainstTheWaitTimeout()
+    {
+        var coordinator = new QueueCoordinator();
+        var requestId = Guid.NewGuid();
+        var waiter = coordinator.Enqueue(new JobRequest(
+            requestId,
+            "waiter",
+            Environment.ProcessId,
+            Environment.CurrentDirectory,
+            DateTimeOffset.UtcNow - TimeSpan.FromMinutes(4),
+            TimeSpan.FromMinutes(5),
+            "Write-Output 'waiter'",
+            RequestLease.GetName(requestId)));
+
+        Assert.IsTrue(coordinator.PauseAll());
+
+        var remaining = waiter.GetRemainingWait(DateTimeOffset.UtcNow + TimeSpan.FromHours(1));
+        Assert.IsTrue(
+            remaining > TimeSpan.FromSeconds(30),
+            $"Queue-paused time counted against the wait timeout ({remaining}).");
+    }
+
     private static JobRequest CreateRequest(string label)
     {
         var requestId = Guid.NewGuid();

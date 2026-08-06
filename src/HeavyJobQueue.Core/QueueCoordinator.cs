@@ -12,6 +12,7 @@ public sealed class QueueCoordinator
     private readonly List<QueueRegistration> _active = [];
     private readonly List<DurableCompletion> _completions = [];
     private readonly QueueStateStore? _stateStore;
+    private bool _isQueuePaused;
 
     public QueueCoordinator(QueueStateStore? stateStore = null)
     {
@@ -23,6 +24,17 @@ public sealed class QueueCoordinator
     }
 
     public event EventHandler? Changed;
+
+    public bool IsQueuePaused
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _isQueuePaused;
+            }
+        }
+    }
 
     public QueueAttachment AttachOrEnqueue(JobRequest request)
     {
@@ -39,8 +51,21 @@ public sealed class QueueCoordinator
             if (registration is null)
             {
                 registration = new QueueRegistration(request, isConnected: true);
-                _waiting.Add(registration);
-                PersistOrRollbackLocked(() => _waiting.Remove(registration));
+                if (_isQueuePaused)
+                {
+                    registration.IsPaused = true;
+                    registration.IsPausedByQueue = true;
+                    registration.PausedAt = DateTimeOffset.UtcNow;
+                    registration.CancelScheduling();
+                    _paused.Add(registration);
+                    PersistOrRollbackLocked(() => _paused.Remove(registration));
+                }
+                else
+                {
+                    _waiting.Add(registration);
+                    PersistOrRollbackLocked(() => _waiting.Remove(registration));
+                }
+
                 isNew = true;
             }
             else
@@ -132,10 +157,12 @@ public sealed class QueueCoordinator
 
             var previousActivatedAt = registration.ActivatedAt;
             var wasPaused = registration.IsPaused;
+            var wasPausedByQueue = registration.IsPausedByQueue;
             var previousPausedAt = registration.PausedAt;
             var wasManualOverride = registration.IsManualOverride;
             registration.ActivatedAt = DateTimeOffset.UtcNow;
             registration.IsPaused = false;
+            registration.IsPausedByQueue = false;
             registration.PausedAt = null;
             registration.IsManualOverride = true;
             registration.CancelScheduling();
@@ -145,6 +172,7 @@ public sealed class QueueCoordinator
                 _active.Remove(registration);
                 registration.ActivatedAt = previousActivatedAt;
                 registration.IsPaused = wasPaused;
+                registration.IsPausedByQueue = wasPausedByQueue;
                 registration.PausedAt = previousPausedAt;
                 registration.IsManualOverride = wasManualOverride;
                 registration.ResetScheduling();
@@ -175,6 +203,7 @@ public sealed class QueueCoordinator
             registration = _waiting[index];
             _waiting.RemoveAt(index);
             registration.IsPaused = true;
+            registration.IsPausedByQueue = _isQueuePaused;
             registration.PausedAt = DateTimeOffset.UtcNow;
             registration.CancelScheduling();
             _paused.Add(registration);
@@ -182,6 +211,7 @@ public sealed class QueueCoordinator
             {
                 _paused.Remove(registration);
                 registration.IsPaused = false;
+                registration.IsPausedByQueue = false;
                 registration.PausedAt = null;
                 registration.ResetScheduling();
                 _waiting.Insert(index, registration);
@@ -208,8 +238,10 @@ public sealed class QueueCoordinator
             _paused.RemoveAt(index);
             var previousPausedAt = registration.PausedAt;
             var previousPausedDuration = registration.TotalPausedDuration;
+            var wasPausedByQueue = registration.IsPausedByQueue;
             registration.AddPausedDuration(DateTimeOffset.UtcNow);
             registration.IsPaused = false;
+            registration.IsPausedByQueue = false;
             registration.PausedAt = null;
             registration.ResetScheduling();
             _waiting.Add(registration);
@@ -217,6 +249,7 @@ public sealed class QueueCoordinator
             {
                 _waiting.Remove(registration);
                 registration.IsPaused = true;
+                registration.IsPausedByQueue = wasPausedByQueue;
                 registration.PausedAt = previousPausedAt;
                 registration.TotalPausedDuration = previousPausedDuration;
                 registration.CancelScheduling();
@@ -225,6 +258,114 @@ public sealed class QueueCoordinator
         }
 
         registration.MarkResumed();
+        OnChanged();
+        return true;
+    }
+
+    public bool PauseAll()
+    {
+        QueueRegistration[] paused;
+        lock (_gate)
+        {
+            if (_isQueuePaused)
+            {
+                return false;
+            }
+
+            paused = _waiting.ToArray();
+            var pausedAt = DateTimeOffset.UtcNow;
+            _isQueuePaused = true;
+            _waiting.Clear();
+            foreach (var registration in paused)
+            {
+                registration.IsPaused = true;
+                registration.IsPausedByQueue = true;
+                registration.PausedAt = pausedAt;
+                registration.CancelScheduling();
+                _paused.Add(registration);
+            }
+
+            PersistOrRollbackLocked(() =>
+            {
+                _isQueuePaused = false;
+                foreach (var registration in paused)
+                {
+                    _paused.Remove(registration);
+                    registration.IsPaused = false;
+                    registration.IsPausedByQueue = false;
+                    registration.PausedAt = null;
+                    registration.ResetScheduling();
+                }
+
+                _waiting.InsertRange(0, paused);
+            });
+        }
+
+        foreach (var registration in paused)
+        {
+            registration.MarkPaused();
+        }
+
+        OnChanged();
+        return true;
+    }
+
+    public bool ResumeAll()
+    {
+        QueueRegistration[] resumed;
+        lock (_gate)
+        {
+            if (!_isQueuePaused)
+            {
+                return false;
+            }
+
+            var held = _paused
+                .Select((registration, index) => (Registration: registration, Index: index))
+                .Where(item => item.Registration.IsPausedByQueue)
+                .ToArray();
+            var previousPausedAt = held
+                .Select(item => item.Registration.PausedAt)
+                .ToArray();
+            var previousPausedDuration = held
+                .Select(item => item.Registration.TotalPausedDuration)
+                .ToArray();
+            var resumedAt = DateTimeOffset.UtcNow;
+            resumed = held.Select(item => item.Registration).ToArray();
+            _isQueuePaused = false;
+            foreach (var registration in resumed)
+            {
+                _paused.Remove(registration);
+                registration.AddPausedDuration(resumedAt);
+                registration.IsPaused = false;
+                registration.IsPausedByQueue = false;
+                registration.PausedAt = null;
+                registration.ResetScheduling();
+                _waiting.Add(registration);
+            }
+
+            PersistOrRollbackLocked(() =>
+            {
+                _isQueuePaused = true;
+                for (var item = 0; item < held.Length; item++)
+                {
+                    var (registration, index) = held[item];
+                    _waiting.Remove(registration);
+                    registration.IsPaused = true;
+                    registration.IsPausedByQueue = true;
+                    registration.PausedAt = previousPausedAt[item];
+                    registration.TotalPausedDuration = previousPausedDuration[item];
+                    registration.CancelScheduling();
+                    _paused.Insert(index, registration);
+                }
+            });
+        }
+
+        foreach (var registration in resumed)
+        {
+            registration.MarkResumed();
+        }
+
         OnChanged();
         return true;
     }
@@ -462,6 +603,7 @@ public sealed class QueueCoordinator
 
     private void Restore(DurableQueueState state)
     {
+        _isQueuePaused = state.IsQueuePaused;
         foreach (var job in state.Jobs)
         {
             var request = new JobRequest(
@@ -478,6 +620,7 @@ public sealed class QueueCoordinator
                 ActivatedAt = job.ActivatedAt,
                 IsManualOverride = job.IsManualOverride,
                 IsPaused = job.Status == JobStatus.Paused,
+                IsPausedByQueue = job.Status == JobStatus.Paused && job.PausedByQueue,
                 PausedAt = job.PausedAt,
                 TotalPausedDuration = job.TotalPausedDuration
             };
@@ -509,7 +652,8 @@ public sealed class QueueCoordinator
                 .Concat(_waiting.Select(item => DurableJobFactory.From(item, JobStatus.Waiting)))
                 .Concat(_paused.Select(item => DurableJobFactory.From(item, JobStatus.Paused)))
                 .ToArray(),
-            _completions.ToArray()));
+            _completions.ToArray(),
+            _isQueuePaused));
     }
 
     private void PersistOrRollbackLocked(Action rollback)
@@ -554,7 +698,8 @@ public sealed record JobSnapshot(
     DateTimeOffset? ActivatedAt,
     JobStatus Status,
     bool IsManualOverride,
-    string? Command)
+    string? Command,
+    bool IsPausedByQueue = false)
 {
     internal static JobSnapshot From(QueueRegistration registration, JobStatus status) =>
         new(
@@ -566,7 +711,8 @@ public sealed record JobSnapshot(
             registration.ActivatedAt,
             status,
             registration.IsManualOverride,
-            registration.Request.Command);
+            registration.Request.Command,
+            registration.IsPausedByQueue);
 }
 
 public sealed record QueueState(
@@ -604,6 +750,8 @@ public sealed class QueueRegistration
     public bool IsManualOverride { get; internal set; }
 
     public bool IsPaused { get; internal set; }
+
+    public bool IsPausedByQueue { get; internal set; }
 
     public bool IsConnected { get; private set; }
 
@@ -702,5 +850,6 @@ internal static class DurableJobFactory
             status,
             registration.IsManualOverride,
             registration.PausedAt,
-            registration.TotalPausedDuration);
+            registration.TotalPausedDuration,
+            registration.IsPausedByQueue);
 }

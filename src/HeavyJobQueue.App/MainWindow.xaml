@@ -13,12 +13,27 @@
     <Grid Margin="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="280" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <GroupBox Grid.Row="0" Margin="0,0,0,16" Header="Active jobs">
+        <Border x:Name="QueuePausedBanner"
+                Grid.Row="0"
+                Margin="0,0,0,16"
+                Padding="12,8"
+                Background="{DynamicResource WarningButtonBrush}"
+                BorderBrush="{DynamicResource BorderBrush}"
+                BorderThickness="1"
+                CornerRadius="2"
+                Visibility="Collapsed">
+            <TextBlock Foreground="{DynamicResource PrimaryTextBrush}"
+                       TextWrapping="Wrap"
+                       Text="Queue paused. Waiting jobs and new arrivals are held until you resume. Active jobs keep running. Resume a single waiter, or use Run now, to let one job through." />
+        </Border>
+
+        <GroupBox Grid.Row="1" Margin="0,0,0,16" Header="Active jobs">
             <DataGrid x:Name="ActiveGrid"
                       Margin="10"
                       MinHeight="58"
@@ -48,11 +63,11 @@
             </DataGrid>
         </GroupBox>
 
-        <GroupBox Grid.Row="1" Margin="0,0,0,16" Header="System utilization">
+        <GroupBox Grid.Row="2" Margin="0,0,0,16" Header="System utilization">
             <local:PerformanceHistoryControl x:Name="PerformanceHistory" Margin="8" />
         </GroupBox>
 
-        <GroupBox Grid.Row="2" Header="Waiting jobs">
+        <GroupBox Grid.Row="3" Header="Waiting jobs">
             <DataGrid x:Name="WaitingGrid"
                       Margin="10"
                       AutoGenerateColumns="False"
@@ -72,7 +87,7 @@
                 </DataGrid.RowStyle>
                 <DataGrid.Columns>
                     <DataGridTextColumn Width="44" Binding="{Binding Position}" Header="#" />
-                    <DataGridTextColumn Width="80" Binding="{Binding Status}" Header="Status" />
+                    <DataGridTextColumn Width="100" Binding="{Binding Status}" Header="Status" />
                     <DataGridTextColumn Width="2*" Binding="{Binding Label}" Header="Label" />
                     <DataGridTextColumn Width="80" Binding="{Binding Pid}" Header="PID" />
                     <DataGridTextColumn Width="3*" Binding="{Binding Cwd}" Header="Working directory" />
@@ -81,11 +96,16 @@
             </DataGrid>
         </GroupBox>
 
-        <DockPanel Grid.Row="3" Margin="0,14,0,0">
+        <DockPanel Grid.Row="4" Margin="0,14,0,0">
             <TextBlock VerticalAlignment="Center"
                        Foreground="{DynamicResource SecondaryTextBrush}"
                        Text="Closing this window keeps the broker running in the tray." />
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button x:Name="PauseAllButton"
+                        Width="100"
+                        Margin="8,0,24,0"
+                        Click="PauseAll_Click"
+                        Content="Pause all" />
                 <Button Width="90"
                         Margin="8,0,0,0"
                         Background="{DynamicResource WarningButtonBrush}"

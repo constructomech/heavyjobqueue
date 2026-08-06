@@ -69,6 +69,46 @@ public sealed class QueueBrokerRecoveryTests
         }
     }
 
+    [TestMethod]
+    public async Task JobEnqueuedWhileQueuePausedIsNotifiedAndGrantedAfterResumeAll()
+    {
+        var directory = CreateTemporaryDirectory();
+        var request = CreateRequest("held");
+        using var lease = new LeaseHolder(request.LeaseName);
+        try
+        {
+            var pipeName = $"{Protocol.PipeName}.Tests.{Guid.NewGuid():N}";
+            var store = new QueueStateStore(Path.Combine(directory, "queue-state.json"));
+            var coordinator = new QueueCoordinator(store);
+            await using var broker = new QueueBroker(coordinator, pipeName);
+            broker.Start();
+            Assert.IsTrue(coordinator.PauseAll());
+
+            await using var client = await BrokerClient.ConnectAsync(pipeName);
+            await client.SendAsync(CreateEnqueue(request));
+            Assert.AreEqual("queued", (await client.ReadAsync()).GetProperty("type").GetString());
+            Assert.AreEqual("paused", (await client.ReadAsync()).GetProperty("type").GetString());
+            Assert.IsNull(coordinator.PeekNext());
+
+            Assert.IsTrue(coordinator.ResumeAll());
+
+            var received = new List<string>();
+            string? type;
+            do
+            {
+                type = (await client.ReadAsync()).GetProperty("type").GetString();
+                received.Add(type!);
+            }
+            while (type != "grant");
+
+            CollectionAssert.Contains(received, "resumed");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static string CreateEnqueue(JobRequest request) =>
         Protocol.Serialize(new
         {

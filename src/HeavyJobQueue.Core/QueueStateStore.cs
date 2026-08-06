@@ -105,7 +105,8 @@ public sealed class QueueStateStore
 public sealed record DurableQueueState(
     int Version,
     IReadOnlyList<DurableJob> Jobs,
-    IReadOnlyList<DurableCompletion> Completions)
+    IReadOnlyList<DurableCompletion> Completions,
+    bool IsQueuePaused = false)
 {
     public static DurableQueueState Empty { get; } =
         new(QueueStateStore.CurrentVersion, [], []);
@@ -124,7 +125,8 @@ public sealed record DurableJob(
     JobStatus Status,
     bool IsManualOverride,
     DateTimeOffset? PausedAt,
-    TimeSpan TotalPausedDuration);
+    TimeSpan TotalPausedDuration,
+    bool PausedByQueue = false);
 
 public sealed record DurableCompletion(
     Guid RequestId,

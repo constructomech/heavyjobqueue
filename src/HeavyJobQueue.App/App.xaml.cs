@@ -10,6 +10,7 @@ public partial class App : System.Windows.Application
 {
     private const string MutexName = "Local\\GitHubCopilot.HeavyJobQueue.Broker.v1";
     private Mutex? _instanceMutex;
+    private QueueCoordinator? _coordinator;
     private QueueBroker? _broker;
     private MainWindow? _window;
     private Forms.NotifyIcon? _trayIcon;
@@ -38,6 +39,7 @@ public partial class App : System.Windows.Application
         SystemEvents.UserPreferenceChanged += SystemThemeChanged;
 
         var coordinator = new QueueCoordinator(new QueueStateStore());
+        _coordinator = coordinator;
         _broker = new QueueBroker(coordinator);
         _broker.Start();
 
@@ -46,8 +48,11 @@ public partial class App : System.Windows.Application
 
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("Open queue", null, (_, _) => ShowQueue());
+        var pauseAllItem = menu.Items.Add("Pause all", null, (_, _) => TogglePauseAll());
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitApplication());
+        menu.Opening += (_, _) =>
+            pauseAllItem.Text = coordinator.IsQueuePaused ? "Resume all" : "Pause all";
 
         _trayImage = TrayIconFactory.Create();
         _trayIcon = new Forms.NotifyIcon
@@ -93,6 +98,23 @@ public partial class App : System.Windows.Application
         }
 
         _window.ShowAndActivate();
+    }
+
+    private void TogglePauseAll()
+    {
+        if (_coordinator is null)
+        {
+            return;
+        }
+
+        if (_coordinator.IsQueuePaused)
+        {
+            _coordinator.ResumeAll();
+        }
+        else
+        {
+            _coordinator.PauseAll();
+        }
     }
 
     private void ExitApplication()

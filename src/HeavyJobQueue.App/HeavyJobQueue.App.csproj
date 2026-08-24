@@ -13,6 +13,11 @@
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>HeavyJobQueue</AssemblyName>
     <RootNamespace>HeavyJobQueue.App</RootNamespace>
+    <ApplicationIcon>Assets\HeavyJobQueue.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\HeavyJobQueue.ico" />
+  </ItemGroup>
 
 </Project>

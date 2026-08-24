@@ -110,6 +110,22 @@ The optional third argument is the queue wait timeout in minutes and defaults to
 } -TimeoutMinutes 30
 ```
 
+While a job waits, the wrapper prints a heartbeat with the elapsed wait, the
+last reported queue position, and the time left before it gives up. The interval
+starts at `-HeartbeatSeconds` (default 60) and doubles up to 15 minutes, so a
+long wait stays readable. A queued session is therefore visibly waiting instead
+of silently producing no output, which is what a hang looks like to a Copilot
+session:
+
+```text
+Heavy job queued at position 2: Run benchmarks
+Heavy job still waiting after 00:01:00 at queue position 2; gives up in 03:59:00: Run benchmarks
+```
+
+`-PauseTimeoutMinutes` (default 60) bounds how long an operator pause can hold
+this job. The wrapper cancels its queue entry and fails once that elapses, so a
+forgotten **Pause all** cannot block a session indefinitely.
+
 The tray menu opens the queue window, pauses or resumes the whole queue, or
 exits the broker. The window shows all active jobs and waiters with label,
 process ID, working directory, and elapsed time. Select a waiting row and use
@@ -124,7 +140,8 @@ active and overridden job finishes.
 **Pause / resume** moves a selected waiter to or from a paused section at the
 bottom of the queue. New jobs and unpaused waiters pass paused jobs. Resuming
 appends the job behind current waiters but ahead of jobs that remain paused.
-Time spent paused does not count against the wrapper's queue wait timeout.
+Time spent paused does not count against the wrapper's queue wait timeout, but
+it does count against the wrapper's own `-PauseTimeoutMinutes` cap.
 
 **Pause all / Resume all** holds the entire queue. Every current waiter and
 every job that arrives afterwards is paused until you resume, and a banner
@@ -140,6 +157,8 @@ the queue-wide hold. Jobs you paused individually stay paused through
 **Resume all**; the `Status` column distinguishes `Queue paused` from `Paused`.
 As with individual pause, time spent globally paused does not count against the
 wrapper's wait timeout, and the paused queue is restored after a broker restart.
+Each wrapper still enforces its own `-PauseTimeoutMinutes` cap, so a queue left
+paused fails its waiters with a clear reason rather than holding them forever.
 
 Hover over an active, waiting, or paused row to see the complete PowerShell
 scriptblock text submitted by the wrapper.
@@ -177,6 +196,12 @@ rerun the installer.
 wrapper releases its named lease, after which the broker removes its queue
 entry. Time spent paused does not count against the timeout, including across a
 broker restart.
+
+**A session looks hung while queued**: It is usually waiting behind a
+long-running job, which the tray window shows as the current active job. Read
+the wrapper's heartbeat output to confirm it is still queued and see its
+position; lower `-HeartbeatSeconds` for more frequent updates. Use **Run now**
+to grant a waiter immediately when the machine can take the extra load.
 
 ## License
 

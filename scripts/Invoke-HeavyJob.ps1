@@ -7,7 +7,13 @@ param(
     [scriptblock] $Job,
 
     [ValidateRange(1, 1440)]
-    [int] $TimeoutMinutes = 240
+    [int] $TimeoutMinutes = 240,
+
+    [ValidateRange(1, 1440)]
+    [int] $PauseTimeoutMinutes = 60,
+
+    [ValidateRange(5, 3600)]
+    [int] $HeartbeatSeconds = 60
 )
 
 Set-StrictMode -Version Latest
@@ -21,8 +27,11 @@ $leaseMutex = [Threading.Mutex]::new($false, $leaseName)
 $pipe = $null
 $reader = $null
 $writer = $null
+$pendingRead = $null
+$maxHeartbeatInterval = [TimeSpan]::FromMinutes(15)
 
 function Close-BrokerConnection {
+    $script:pendingRead = $null
     if ($null -ne $writer) {
         try {
             $writer.Dispose()
@@ -88,19 +97,57 @@ function Connect-Broker {
     }
 }
 
+function Resolve-TaskException {
+    param(
+        [Parameter(Mandatory)]
+        [Management.Automation.ErrorRecord] $ErrorRecord
+    )
+
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception.InnerException -and (
+            $exception -is [Management.Automation.MethodInvocationException] -or
+            $exception -is [AggregateException])) {
+        $exception = $exception.InnerException
+    }
+
+    return $exception
+}
+
 function Read-BrokerMessage {
     param(
         [Parameter(Mandatory)]
         [TimeSpan] $Timeout
     )
 
-    $readTask = $reader.ReadLineAsync()
-    if (-not $readTask.Wait($Timeout)) {
+    # The pending read is kept across timeouts because StreamReader rejects a
+    # second ReadLineAsync while an earlier one is still outstanding.
+    if ($null -eq $pendingRead) {
+        $script:pendingRead = $reader.ReadLineAsync()
+    }
+
+    $readTask = $pendingRead
+    try {
+        $completed = $readTask.Wait($Timeout)
+    }
+    catch {
+        $script:pendingRead = $null
+        throw (Resolve-TaskException -ErrorRecord $_)
+    }
+
+    if (-not $completed) {
         throw [TimeoutException]::new(
             "Timed out waiting for a response from the Heavy Job Queue broker.")
     }
 
-    $line = $readTask.GetAwaiter().GetResult()
+    $script:pendingRead = $null
+
+    try {
+        $line = $readTask.GetAwaiter().GetResult()
+    }
+    catch {
+        throw (Resolve-TaskException -ErrorRecord $_)
+    }
+
     if ($null -eq $line) {
         throw [IO.EndOfStreamException]::new(
             "The Heavy Job Queue broker disconnected.")
@@ -144,12 +191,51 @@ function Assert-BrokerMessage {
     }
 }
 
+function Format-Duration {
+    param(
+        [Parameter(Mandatory)]
+        [TimeSpan] $Value
+    )
+
+    if ($Value -lt [TimeSpan]::Zero) {
+        $Value = [TimeSpan]::Zero
+    }
+
+    if ($Value.Days -gt 0) {
+        return $Value.ToString("d\d\ hh\:mm\:ss")
+    }
+
+    return $Value.ToString("hh\:mm\:ss")
+}
+
+function Get-WaitLimit {
+    if ($isPaused) {
+        return $pauseDeadline
+    }
+
+    return $deadline
+}
+
+function Write-WaitHeartbeat {
+    $now = [DateTimeOffset]::UtcNow
+    $waited = Format-Duration -Value ($now - $enqueueTime)
+    $left = Format-Duration -Value ((Get-WaitLimit) - $now)
+    if ($isPaused) {
+        Write-Host ("Heavy job still paused by the queue operator after ${waited}; " +
+            "cancels in ${left}: $Label")
+    }
+    else {
+        Write-Host ("Heavy job still waiting after ${waited} at queue position " +
+            "${lastPosition}; gives up in ${left}: $Label")
+    }
+}
+
 function Send-Enqueue {
     $writer.WriteLine(($enqueue | ConvertTo-Json -Compress))
 }
 
 function Reconnect-Waiting {
-    while ($isPaused -or [DateTimeOffset]::UtcNow -lt $deadline) {
+    while ([DateTimeOffset]::UtcNow -lt (Get-WaitLimit)) {
         try {
             Connect-Broker
             Send-Enqueue
@@ -172,7 +258,17 @@ function Send-Cancel {
         leaseName = $leaseName
         reason = "wait_timeout"
     }
-    $writer.WriteLine(($cancel | ConvertTo-Json -Compress))
+
+    # Best effort only. The broker independently reaps the entry when its own
+    # wait timeout fires or when this wrapper's lease ends, and a failed cancel
+    # must not mask the timeout that caused it.
+    try {
+        if ($null -ne $writer) {
+            $writer.WriteLine(($cancel | ConvertTo-Json -Compress))
+        }
+    }
+    catch {
+    }
 }
 
 if (-not $leaseMutex.WaitOne(0)) {
@@ -207,18 +303,26 @@ try {
     $granted = $false
     $isPaused = $false
     $pausedAt = $null
+    $pauseDeadline = $deadline
+    $lastPosition = "?"
+    $heartbeatInterval = [TimeSpan]::FromSeconds($HeartbeatSeconds)
     $reportedReconnect = $false
     while (-not $granted) {
-        $remaining = $deadline - [DateTimeOffset]::UtcNow
-        if (-not $isPaused -and $remaining -le [TimeSpan]::Zero) {
+        $remaining = (Get-WaitLimit) - [DateTimeOffset]::UtcNow
+        if ($remaining -le [TimeSpan]::Zero) {
             Send-Cancel
+            if ($isPaused) {
+                throw ("Timed out after $PauseTimeoutMinutes minute(s) while the Heavy " +
+                    "Job Queue held this job paused: $Label")
+            }
+
             throw "Timed out waiting for the Heavy Job Queue grant."
         }
 
-        $readTimeout = if ($isPaused) {
-            [Threading.Timeout]::InfiniteTimeSpan
-        } else {
+        $readTimeout = if ($remaining -lt $heartbeatInterval) {
             $remaining
+        } else {
+            $heartbeatInterval
         }
 
         try {
@@ -226,8 +330,17 @@ try {
             Assert-BrokerMessage -Message $message
         }
         catch [TimeoutException] {
-            Send-Cancel
-            throw "Timed out waiting for the Heavy Job Queue grant."
+            if (((Get-WaitLimit) - [DateTimeOffset]::UtcNow) -gt [TimeSpan]::Zero) {
+                Write-WaitHeartbeat
+                $doubled = $heartbeatInterval + $heartbeatInterval
+                $heartbeatInterval = if ($doubled -gt $maxHeartbeatInterval) {
+                    $maxHeartbeatInterval
+                } else {
+                    $doubled
+                }
+            }
+
+            continue
         }
         catch [IO.IOException] {
             if (-not $reportedReconnect) {
@@ -249,6 +362,7 @@ try {
                 } else {
                     "?"
                 }
+                $lastPosition = $position
                 Write-Host "Heavy job queued at position ${position}: $Label"
             }
             "paused" {
@@ -258,7 +372,10 @@ try {
                 if (-not $isPaused) {
                     $isPaused = $true
                     $pausedAt = [DateTimeOffset]::UtcNow
-                    Write-Host "Heavy job paused by the queue operator: $Label"
+                    $pauseDeadline = $pausedAt.AddMinutes($PauseTimeoutMinutes)
+                    $heartbeatInterval = [TimeSpan]::FromSeconds($HeartbeatSeconds)
+                    Write-Host ("Heavy job paused by the queue operator; cancels after " +
+                        "$PauseTimeoutMinutes minute(s): $Label")
                 }
             }
             "resumed" {
@@ -267,8 +384,10 @@ try {
                 }
                 if ($isPaused) {
                     $deadline = $deadline.Add([DateTimeOffset]::UtcNow - $pausedAt)
+                    $pauseDeadline = $deadline
                     $isPaused = $false
                     $pausedAt = $null
+                    $heartbeatInterval = [TimeSpan]::FromSeconds($HeartbeatSeconds)
                     Write-Host "Heavy job resumed in the queue: $Label"
                 }
             }

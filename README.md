@@ -143,6 +143,10 @@ appends the job behind current waiters but ahead of jobs that remain paused.
 Time spent paused does not count against the wrapper's queue wait timeout, but
 it does count against the wrapper's own `-PauseTimeoutMinutes` cap.
 
+**Kill** permanently removes the selected paused job after confirmation. The
+waiting wrapper receives a terminal cancellation and exits without running its
+command. Active and other queued jobs keep their state and relative order.
+
 **Pause all / Resume all** holds the entire queue. Every current waiter and
 every job that arrives afterwards is paused until you resume, and a banner
 across the top of the window shows that the queue is held. Active jobs are

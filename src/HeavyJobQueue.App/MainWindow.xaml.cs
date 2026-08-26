@@ -128,6 +128,42 @@ public partial class MainWindow : Window
         }
     }
 
+    private void WaitingGrid_SelectionChanged(
+        object sender,
+        System.Windows.Controls.SelectionChangedEventArgs eventArgs) =>
+        KillButton.IsEnabled = WaitingGrid.SelectedItem is WaitingRow { IsPaused: true };
+
+    private void Kill_Click(object sender, RoutedEventArgs eventArgs)
+    {
+        if (WaitingGrid.SelectedItem is not WaitingRow { IsPaused: true } row)
+        {
+            return;
+        }
+
+        var confirmation = MessageBox.Show(
+            this,
+            $"Kill the paused job \"{row.Label}\"?\n\n" +
+            "Only this job will be removed. It cannot be resumed later.",
+            "Kill paused job",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+        if (confirmation != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        if (!_coordinator.RemoveWaiting(row.RequestId))
+        {
+            MessageBox.Show(
+                this,
+                "The job is no longer waiting and was not killed.",
+                "Job not killed",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+    }
+
     private void QueueChanged(object? sender, EventArgs eventArgs) =>
         Dispatcher.BeginInvoke(RefreshQueueState);
 

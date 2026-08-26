@@ -167,6 +167,32 @@ public sealed class QueueBrokerRecoveryTests
         }
     }
 
+    [TestMethod]
+    public async Task OperatorKillNotifiesPausedClientWithoutChangingActiveJob()
+    {
+        var pipeName = $"{Protocol.PipeName}.Tests.{Guid.NewGuid():N}";
+        var coordinator = new QueueCoordinator();
+        var active = coordinator.Enqueue(CreateRequest("active"));
+        var paused = CreateRequest("paused");
+        coordinator.TryActivateNext(active.Request.RequestId);
+        await using var broker = new QueueBroker(coordinator, pipeName);
+        broker.Start();
+
+        await using var client = await BrokerClient.ConnectAsync(pipeName);
+        await client.SendAsync(CreateEnqueue(paused));
+        Assert.AreEqual("queued", (await client.ReadAsync()).GetProperty("type").GetString());
+        Assert.IsTrue(coordinator.Pause(paused.RequestId));
+        Assert.AreEqual("paused", (await client.ReadAsync()).GetProperty("type").GetString());
+
+        Assert.IsTrue(coordinator.RemoveWaiting(paused.RequestId));
+
+        var cancellation = await client.ReadAsync();
+        Assert.AreEqual("error", cancellation.GetProperty("type").GetString());
+        Assert.AreEqual("job_cancelled", cancellation.GetProperty("code").GetString());
+        Assert.AreEqual(active.Request.RequestId, coordinator.Snapshot().ActiveJobs.Single().RequestId);
+        Assert.IsEmpty(coordinator.Snapshot().Waiting);
+    }
+
     private static string CreateEnqueue(JobRequest request) =>
         Protocol.Serialize(new
         {

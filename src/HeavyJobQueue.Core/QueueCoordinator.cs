@@ -472,6 +472,33 @@ public sealed class QueueCoordinator
         return true;
     }
 
+    public bool RemoveWaiting(Guid requestId)
+    {
+        QueueRegistration removed;
+        lock (_gate)
+        {
+            var source = _waiting;
+            var index = source.FindIndex(item => item.Request.RequestId == requestId);
+            if (index < 0)
+            {
+                source = _paused;
+                index = source.FindIndex(item => item.Request.RequestId == requestId);
+            }
+            if (index < 0)
+            {
+                return false;
+            }
+
+            removed = source[index];
+            source.RemoveAt(index);
+            PersistOrRollbackLocked(() => source.Insert(index, removed));
+        }
+
+        removed.MarkRemoved();
+        OnChanged();
+        return true;
+    }
+
     public bool MarkDisconnected(Guid requestId)
     {
         lock (_gate)

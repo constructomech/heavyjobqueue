@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.IO.Pipes;
 using System.Text;
+using System.Threading.Channels;
 
 namespace HeavyJobQueue.Core;
 
@@ -232,6 +233,7 @@ public sealed class QueueBroker : IAsyncDisposable
         using var readCancellation =
             CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var clientMessageTask = reader.ReadLineAsync(readCancellation.Token).AsTask();
+        var removedTask = Task.Delay(Timeout.InfiniteTimeSpan, registration.Removed);
 
         while (!registration.Granted.IsCompleted)
         {
@@ -248,6 +250,7 @@ public sealed class QueueBroker : IAsyncDisposable
                         : TimeSpan.Zero,
                 waitCancellation.Token);
             var first = await Task.WhenAny(
+                removedTask,
                 registration.Granted,
                 clientMessageTask,
                 stateChangeTask,
@@ -255,6 +258,18 @@ public sealed class QueueBroker : IAsyncDisposable
 
             waitCancellation.Cancel();
             cancellationToken.ThrowIfCancellationRequested();
+
+            if (registration.Removed.IsCancellationRequested)
+            {
+                readCancellation.Cancel();
+                await ObserveCanceledReadAsync(clientMessageTask);
+                await ObserveCanceledStateChangeAsync(stateChangeTask);
+                await WriteErrorAsync(
+                    writer,
+                    "job_cancelled",
+                    "The queued job was killed by the queue operator.");
+                return;
+            }
 
             if (first == timeoutTask)
             {
@@ -498,6 +513,21 @@ public sealed class QueueBroker : IAsyncDisposable
         {
         }
         catch (IOException)
+        {
+        }
+    }
+
+    private static async Task ObserveCanceledStateChangeAsync(
+        Task<QueueRegistrationState> stateChangeTask)
+    {
+        try
+        {
+            await stateChangeTask.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (ChannelClosedException)
         {
         }
     }

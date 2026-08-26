@@ -64,6 +64,28 @@ public sealed class QueueCoordinatorTests
     }
 
     [TestMethod]
+    public void RemovingPausedJobLeavesActiveAndQueuedJobsUntouched()
+    {
+        var coordinator = new QueueCoordinator();
+        var active = coordinator.Enqueue(CreateRequest("active"));
+        var firstWaiting = coordinator.Enqueue(CreateRequest("first-waiting"));
+        var paused = coordinator.Enqueue(CreateRequest("paused"));
+        var secondWaiting = coordinator.Enqueue(CreateRequest("second-waiting"));
+        coordinator.TryActivateNext(active.Request.RequestId);
+        coordinator.Pause(paused.Request.RequestId);
+
+        Assert.IsTrue(coordinator.RemoveWaiting(paused.Request.RequestId));
+
+        var state = coordinator.Snapshot();
+        Assert.AreEqual(active.Request.RequestId, state.ActiveJobs.Single().RequestId);
+        CollectionAssert.AreEqual(
+            new[] { firstWaiting.Request.RequestId, secondWaiting.Request.RequestId },
+            state.Waiting.Select(job => job.RequestId).ToArray());
+        Assert.IsTrue(paused.Removed.IsCancellationRequested);
+        Assert.IsFalse(coordinator.RemoveWaiting(active.Request.RequestId));
+    }
+
+    [TestMethod]
     public void RunNowGrantsMultipleOverridesAndBlocksAutomaticQueue()
     {
         var coordinator = new QueueCoordinator();

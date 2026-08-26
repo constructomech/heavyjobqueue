@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Windows;
 using System.Windows.Threading;
 using HeavyJobQueue.Core;
+using MessageBox = System.Windows.MessageBox;
 
 namespace HeavyJobQueue.App;
 

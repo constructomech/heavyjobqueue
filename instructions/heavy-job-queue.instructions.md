@@ -27,3 +27,7 @@ running wrapper means it is still queued or the job is still running; it is not
 a lost completion notification. Wait for it, and read the pending output to see
 the latest heartbeat. Do not re-run the command, shorten the wait, or run the
 heavy command directly, since a second submission only adds another queue entry.
+
+If the wrapper reports that the queue operator paused the job, it keeps its place
+and waits until the operator resumes it; it does not cancel itself. Keep waiting
+and report that the queue is paused rather than resubmitting the job.

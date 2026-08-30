@@ -9,8 +9,9 @@ param(
     [ValidateRange(1, 1440)]
     [int] $TimeoutMinutes = 240,
 
-    [ValidateRange(1, 1440)]
-    [int] $PauseTimeoutMinutes = 60,
+    # 0 keeps the job queued for as long as the operator holds it paused.
+    [ValidateRange(0, 1440)]
+    [int] $PauseTimeoutMinutes = 0,
 
     [ValidateRange(5, 3600)]
     [int] $HeartbeatSeconds = 60
@@ -29,6 +30,7 @@ $reader = $null
 $writer = $null
 $pendingRead = $null
 $maxHeartbeatInterval = [TimeSpan]::FromMinutes(15)
+$maxReconnectWait = [TimeSpan]::FromMinutes(15)
 
 function Close-BrokerConnection {
     $script:pendingRead = $null
@@ -219,12 +221,20 @@ function Get-WaitLimit {
 function Write-WaitHeartbeat {
     $now = [DateTimeOffset]::UtcNow
     $waited = Format-Duration -Value ($now - $enqueueTime)
-    $left = Format-Duration -Value ((Get-WaitLimit) - $now)
     if ($isPaused) {
-        Write-Host ("Heavy job still paused by the queue operator after ${waited}; " +
-            "cancels in ${left}: $Label")
+        $pausedFor = Format-Duration -Value ($now - $pausedAt)
+        if ($PauseTimeoutMinutes -gt 0) {
+            $left = Format-Duration -Value ((Get-WaitLimit) - $now)
+            Write-Host ("Heavy job still paused by the queue operator after " +
+                "${pausedFor}; cancels in ${left}: $Label")
+        }
+        else {
+            Write-Host ("Heavy job still paused by the queue operator after " +
+                "${pausedFor}; waiting until resumed: $Label")
+        }
     }
     else {
+        $left = Format-Duration -Value ((Get-WaitLimit) - $now)
         Write-Host ("Heavy job still waiting after ${waited} at queue position " +
             "${lastPosition}; gives up in ${left}: $Label")
     }
@@ -235,7 +245,11 @@ function Send-Enqueue {
 }
 
 function Reconnect-Waiting {
-    while ([DateTimeOffset]::UtcNow -lt (Get-WaitLimit)) {
+    # An indefinite pause must not spin here forever when the broker never comes
+    # back, so reconnect attempts carry their own bounded budget.
+    $reconnectLimit = [DateTimeOffset]::UtcNow.Add($maxReconnectWait)
+    while ([DateTimeOffset]::UtcNow -lt (Get-WaitLimit) -and
+        [DateTimeOffset]::UtcNow -lt $reconnectLimit) {
         try {
             Connect-Broker
             Send-Enqueue
@@ -372,10 +386,17 @@ try {
                 if (-not $isPaused) {
                     $isPaused = $true
                     $pausedAt = [DateTimeOffset]::UtcNow
-                    $pauseDeadline = $pausedAt.AddMinutes($PauseTimeoutMinutes)
+                    if ($PauseTimeoutMinutes -gt 0) {
+                        $pauseDeadline = $pausedAt.AddMinutes($PauseTimeoutMinutes)
+                        Write-Host ("Heavy job paused by the queue operator; cancels " +
+                            "after $PauseTimeoutMinutes minute(s): $Label")
+                    }
+                    else {
+                        $pauseDeadline = [DateTimeOffset]::MaxValue
+                        Write-Host ("Heavy job paused by the queue operator; waiting " +
+                            "until resumed: $Label")
+                    }
                     $heartbeatInterval = [TimeSpan]::FromSeconds($HeartbeatSeconds)
-                    Write-Host ("Heavy job paused by the queue operator; cancels after " +
-                        "$PauseTimeoutMinutes minute(s): $Label")
                 }
             }
             "resumed" {

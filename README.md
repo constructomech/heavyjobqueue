@@ -122,9 +122,19 @@ Heavy job queued at position 2: Run benchmarks
 Heavy job still waiting after 00:01:00 at queue position 2; gives up in 03:59:00: Run benchmarks
 ```
 
-`-PauseTimeoutMinutes` (default 60) bounds how long an operator pause can hold
-this job. The wrapper cancels its queue entry and fails once that elapses, so a
-forgotten **Pause all** cannot block a session indefinitely.
+An operator pause holds the job for as long as the queue stays paused. The
+wrapper does not cancel itself, and its heartbeat reports the pause instead of a
+countdown:
+
+```text
+Heavy job paused by the queue operator; waiting until resumed: Run benchmarks
+Heavy job still paused by the queue operator after 00:05:00; waiting until resumed: Run benchmarks
+```
+
+Set `-PauseTimeoutMinutes` to a non-zero value to opt into a bounded pause, after
+which the wrapper cancels its queue entry and fails. It defaults to `0`, meaning
+no auto-cancel, because silently discarding queued work is worse than waiting for
+the operator to resume.
 
 The tray menu opens the queue window, pauses or resumes the whole queue, or
 exits the broker. The window shows all active jobs and waiters with label,
@@ -140,8 +150,9 @@ active and overridden job finishes.
 **Pause / resume** moves a selected waiter to or from a paused section at the
 bottom of the queue. New jobs and unpaused waiters pass paused jobs. Resuming
 appends the job behind current waiters but ahead of jobs that remain paused.
-Time spent paused does not count against the wrapper's queue wait timeout, but
-it does count against the wrapper's own `-PauseTimeoutMinutes` cap.
+Time spent paused does not count against the wrapper's queue wait timeout, and by
+default it is not capped either, so a paused job keeps its place until you resume
+it.
 
 **Kill** permanently removes the selected paused job after confirmation. The
 waiting wrapper receives a terminal cancellation and exits without running its
@@ -161,8 +172,9 @@ the queue-wide hold. Jobs you paused individually stay paused through
 **Resume all**; the `Status` column distinguishes `Queue paused` from `Paused`.
 As with individual pause, time spent globally paused does not count against the
 wrapper's wait timeout, and the paused queue is restored after a broker restart.
-Each wrapper still enforces its own `-PauseTimeoutMinutes` cap, so a queue left
-paused fails its waiters with a clear reason rather than holding them forever.
+Waiters stay queued until you resume unless they opted into
+`-PauseTimeoutMinutes`, so leaving the queue paused defers work rather than
+discarding it.
 
 Hover over an active, waiting, or paused row to see the complete PowerShell
 scriptblock text submitted by the wrapper.
@@ -206,6 +218,10 @@ long-running job, which the tray window shows as the current active job. Read
 the wrapper's heartbeat output to confirm it is still queued and see its
 position; lower `-HeartbeatSeconds` for more frequent updates. Use **Run now**
 to grant a waiter immediately when the machine can take the extra load.
+
+**A session reports that it is paused**: The queue, or that one job, is held by
+the operator. Resume it from the tray window. The waiter is not on a timer by
+default, so it keeps its place and starts when the queue runs again.
 
 ## License
 

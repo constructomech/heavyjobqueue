@@ -52,11 +52,19 @@ jobs and cap each command at four internal workers:
 
 ## Install
 
-Close an already installed tray instance before upgrading, then run the explicit
-installer from the repository:
+When the tray app is not running, run the installer directly from the repository:
 
 ```powershell
 .\scripts\Install-HeavyJobQueue.ps1
+```
+
+When upgrading a running broker, queue the publish and let the installer stop the
+tray app only for the file swap:
+
+```powershell
+& "$HOME\.copilot\tools\Invoke-HeavyJob.ps1" "Install Heavy Job Queue" {
+    .\scripts\Install-HeavyJobQueue.ps1 -StopRunningInstance
+}
 ```
 
 For the one-time upgrade from protocol v1, wait until the old queue is completely

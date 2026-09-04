@@ -3,7 +3,8 @@ param(
     [switch] $EnableStartup,
     [switch] $DisableStartup,
     [switch] $NoLaunch,
-    [switch] $SkipInstructions
+    [switch] $SkipInstructions,
+    [switch] $StopRunningInstance
 )
 
 Set-StrictMode -Version Latest
@@ -43,17 +44,20 @@ if (-not $SkipInstructions -and (Test-Path -LiteralPath $installedInstructions))
     }
 }
 
-$runningInstances = @(
-    Get-Process -Name "HeavyJobQueue" -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.Path -in @(
-                $executablePath,
-                $obsoleteSingleFilePath,
-                $legacyExecutablePath
-            )
-        }
-)
-if ($runningInstances.Count -gt 0) {
+function Get-RunningInstances {
+    @(
+        Get-Process -Name "HeavyJobQueue" -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Path -in @(
+                    $executablePath,
+                    $obsoleteSingleFilePath,
+                    $legacyExecutablePath
+                )
+            }
+    )
+}
+
+if ((Get-RunningInstances).Count -gt 0 -and -not $StopRunningInstance) {
     throw "Exit Heavy Job Queue from its tray menu before installing or upgrading."
 }
 
@@ -75,6 +79,18 @@ try {
     }
 
     & $publish
+
+    if ($StopRunningInstance) {
+        $runningInstances = Get-RunningInstances
+        foreach ($instance in $runningInstances) {
+            Stop-Process -Id $instance.Id
+        }
+        foreach ($instance in $runningInstances) {
+            if (-not $instance.WaitForExit(15000)) {
+                throw "Heavy Job Queue process $($instance.Id) did not exit within 15 seconds."
+            }
+        }
+    }
 
     [IO.Directory]::CreateDirectory($toolsDirectory) | Out-Null
     [IO.Directory]::CreateDirectory($stagingInstallDirectory) | Out-Null

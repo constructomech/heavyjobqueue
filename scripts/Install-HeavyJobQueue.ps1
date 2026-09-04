@@ -57,7 +57,7 @@ function Get-RunningInstances {
     )
 }
 
-if ((Get-RunningInstances).Count -gt 0 -and -not $StopRunningInstance) {
+if (@(Get-RunningInstances).Count -gt 0 -and -not $StopRunningInstance) {
     throw "Exit Heavy Job Queue from its tray menu before installing or upgrading."
 }
 
@@ -81,7 +81,7 @@ try {
     & $publish
 
     if ($StopRunningInstance) {
-        $runningInstances = Get-RunningInstances
+        $runningInstances = @(Get-RunningInstances)
         foreach ($instance in $runningInstances) {
             Stop-Process -Id $instance.Id
         }

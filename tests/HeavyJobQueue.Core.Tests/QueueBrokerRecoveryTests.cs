@@ -10,6 +10,51 @@ namespace HeavyJobQueue.Core.Tests;
 public sealed class QueueBrokerRecoveryTests
 {
     [TestMethod]
+    public async Task BrokerGrantsSharedJobsTogetherBeforeExclusiveWaiter()
+    {
+        var pipeName = $"{Protocol.PipeName}.Tests.{Guid.NewGuid():N}";
+        var coordinator = new QueueCoordinator();
+        var first = CreateRequest("first", JobAccessMode.Shared);
+        var second = CreateRequest("second", JobAccessMode.Shared);
+        var exclusive = CreateRequest("benchmark");
+        using var firstLease = new LeaseHolder(first.LeaseName);
+        using var secondLease = new LeaseHolder(second.LeaseName);
+        using var exclusiveLease = new LeaseHolder(exclusive.LeaseName);
+        await using var broker = new QueueBroker(coordinator, pipeName);
+        broker.Start();
+
+        await using var firstClient = await BrokerClient.ConnectAsync(pipeName);
+        await firstClient.SendAsync(CreateEnqueue(first));
+        Assert.AreEqual("queued", (await firstClient.ReadAsync()).GetProperty("type").GetString());
+        Assert.AreEqual("grant", (await firstClient.ReadAsync()).GetProperty("type").GetString());
+
+        await using var secondClient = await BrokerClient.ConnectAsync(pipeName);
+        await secondClient.SendAsync(CreateEnqueue(second));
+        Assert.AreEqual("queued", (await secondClient.ReadAsync()).GetProperty("type").GetString());
+        Assert.AreEqual("grant", (await secondClient.ReadAsync()).GetProperty("type").GetString());
+
+        await using var exclusiveClient = await BrokerClient.ConnectAsync(pipeName);
+        await exclusiveClient.SendAsync(CreateEnqueue(exclusive));
+        Assert.AreEqual(
+            "queued",
+            (await exclusiveClient.ReadAsync()).GetProperty("type").GetString());
+        Assert.HasCount(2, coordinator.Snapshot().ActiveJobs);
+        Assert.AreEqual(
+            exclusive.RequestId,
+            coordinator.Snapshot().Waiting.Single().RequestId);
+
+        await firstClient.SendAsync(CreateCompletion(first));
+        Assert.AreEqual("ack", (await firstClient.ReadAsync()).GetProperty("type").GetString());
+        Assert.HasCount(1, coordinator.Snapshot().ActiveJobs);
+
+        await secondClient.SendAsync(CreateCompletion(second));
+        Assert.AreEqual("ack", (await secondClient.ReadAsync()).GetProperty("type").GetString());
+        Assert.AreEqual(
+            "grant",
+            (await exclusiveClient.ReadAsync()).GetProperty("type").GetString());
+    }
+
+    [TestMethod]
     public async Task WaitingClientReclaimsPositionBehindRestoredActiveLease()
     {
         var directory = CreateTemporaryDirectory();
@@ -203,12 +248,27 @@ public sealed class QueueBrokerRecoveryTests
             callerPid = request.CallerPid,
             request.Cwd,
             command = request.Command,
+            accessMode = request.AccessMode == JobAccessMode.Shared ? "shared" : "exclusive",
             enqueuedAt = request.EnqueuedAt.ToString("o"),
             waitTimeoutSeconds = (int)request.WaitTimeout.TotalSeconds,
             leaseName = request.LeaseName
         });
 
-    private static JobRequest CreateRequest(string label)
+    private static string CreateCompletion(JobRequest request) =>
+        Protocol.Serialize(new
+        {
+            version = Protocol.Version,
+            type = "complete",
+            requestId = request.RequestId,
+            leaseName = request.LeaseName,
+            succeeded = true,
+            exitCode = 0,
+            error = (string?)null
+        });
+
+    private static JobRequest CreateRequest(
+        string label,
+        JobAccessMode accessMode = JobAccessMode.Exclusive)
     {
         var requestId = Guid.NewGuid();
         return new JobRequest(
@@ -219,7 +279,8 @@ public sealed class QueueBrokerRecoveryTests
             DateTimeOffset.UtcNow,
             TimeSpan.FromMinutes(5),
             $"Write-Output '{label}'",
-            RequestLease.GetName(requestId));
+            RequestLease.GetName(requestId),
+            accessMode);
     }
 
     private static string CreateTemporaryDirectory()

@@ -85,9 +85,9 @@ public sealed class QueueCoordinator
     {
         lock (_gate)
         {
-            return _active.Count == 0 &&
-                _waiting.Count > 0 &&
-                _waiting[0].IsConnected
+            return _waiting.Count > 0 &&
+                _waiting[0].IsConnected &&
+                CanActivateLocked(_waiting[0])
                     ? _waiting[0]
                     : null;
         }
@@ -98,10 +98,10 @@ public sealed class QueueCoordinator
         QueueRegistration? registration = null;
         lock (_gate)
         {
-            if (_active.Count > 0 ||
-                _waiting.Count == 0 ||
+            if (_waiting.Count == 0 ||
                 _waiting[0].Request.RequestId != requestId ||
-                !_waiting[0].IsConnected)
+                !_waiting[0].IsConnected ||
+                !CanActivateLocked(_waiting[0]))
             {
                 return false;
             }
@@ -139,8 +139,6 @@ public sealed class QueueCoordinator
                 {
                     return false;
                 }
-
-                _waiting.RemoveAt(index);
             }
             else
             {
@@ -152,9 +150,14 @@ public sealed class QueueCoordinator
 
                 source = _paused;
                 registration = _paused[index];
-                _paused.RemoveAt(index);
             }
 
+            if (!CanActivateLocked(registration))
+            {
+                return false;
+            }
+
+            source.RemoveAt(index);
             var previousActivatedAt = registration.ActivatedAt;
             var wasPaused = registration.IsPaused;
             var wasPausedByQueue = registration.IsPausedByQueue;
@@ -628,6 +631,16 @@ public sealed class QueueCoordinator
             .Concat(_paused)
             .FirstOrDefault(item => item.Request.RequestId == requestId);
 
+    private bool CanActivateLocked(QueueRegistration registration)
+    {
+        if (_active.Any(item => item.Request.AccessMode == JobAccessMode.Exclusive))
+        {
+            return false;
+        }
+
+        return registration.Request.AccessMode == JobAccessMode.Shared || _active.Count == 0;
+    }
+
     private void Restore(DurableQueueState state)
     {
         _isQueuePaused = state.IsQueuePaused;
@@ -641,7 +654,8 @@ public sealed class QueueCoordinator
                 job.EnqueuedAt,
                 job.WaitTimeout,
                 job.Command,
-                job.LeaseName);
+                job.LeaseName,
+                job.AccessMode);
             var registration = new QueueRegistration(request, isConnected: false)
             {
                 ActivatedAt = job.ActivatedAt,
@@ -707,7 +721,14 @@ public sealed record JobRequest(
     DateTimeOffset EnqueuedAt,
     TimeSpan WaitTimeout,
     string? Command,
-    string LeaseName);
+    string LeaseName,
+    JobAccessMode AccessMode = JobAccessMode.Exclusive);
+
+public enum JobAccessMode
+{
+    Exclusive,
+    Shared
+}
 
 public enum JobStatus
 {
@@ -726,7 +747,8 @@ public sealed record JobSnapshot(
     JobStatus Status,
     bool IsManualOverride,
     string? Command,
-    bool IsPausedByQueue = false)
+    bool IsPausedByQueue = false,
+    JobAccessMode AccessMode = JobAccessMode.Exclusive)
 {
     internal static JobSnapshot From(QueueRegistration registration, JobStatus status) =>
         new(
@@ -739,7 +761,8 @@ public sealed record JobSnapshot(
             status,
             registration.IsManualOverride,
             registration.Request.Command,
-            registration.IsPausedByQueue);
+            registration.IsPausedByQueue,
+            registration.Request.AccessMode);
 }
 
 public sealed record QueueState(
@@ -816,7 +839,8 @@ public sealed class QueueRegistration
         }
 
         if (request.CallerPid != Request.CallerPid ||
-            !string.Equals(request.LeaseName, Request.LeaseName, StringComparison.Ordinal))
+            !string.Equals(request.LeaseName, Request.LeaseName, StringComparison.Ordinal) ||
+            request.AccessMode != Request.AccessMode)
         {
             throw new InvalidOperationException(
                 $"Request '{request.RequestId}' does not match its durable lease.");
@@ -878,5 +902,6 @@ internal static class DurableJobFactory
             registration.IsManualOverride,
             registration.PausedAt,
             registration.TotalPausedDuration,
-            registration.IsPausedByQueue);
+            registration.IsPausedByQueue,
+            registration.Request.AccessMode);
 }

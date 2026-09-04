@@ -126,7 +126,8 @@ public sealed record DurableJob(
     bool IsManualOverride,
     DateTimeOffset? PausedAt,
     TimeSpan TotalPausedDuration,
-    bool PausedByQueue = false);
+    bool PausedByQueue = false,
+    JobAccessMode AccessMode = JobAccessMode.Exclusive);
 
 public sealed record DurableCompletion(
     Guid RequestId,

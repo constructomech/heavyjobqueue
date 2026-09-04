@@ -36,6 +36,30 @@ public sealed class QueueStateStoreTests
                 waiting.Request.RequestId,
                 restored.PeekNext()!.Request.RequestId);
         }
+
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public void RestoresJobAccessMode()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var store = new QueueStateStore(Path.Combine(directory, "queue-state.json"));
+            var coordinator = new QueueCoordinator(store);
+            var shared = coordinator.Enqueue(CreateRequest("shared", JobAccessMode.Shared));
+
+            var restored = new QueueCoordinator(store);
+
+            Assert.AreEqual(
+                JobAccessMode.Shared,
+                restored.Snapshot().Waiting.Single().AccessMode);
+            restored.AttachOrEnqueue(shared.Request);
+        }
         finally
         {
             Directory.Delete(directory, recursive: true);
@@ -240,6 +264,7 @@ public sealed class QueueStateStoreTests
                 new[] { waitingId, pausedId },
                 state.Waiting.Select(job => job.RequestId).ToArray());
             Assert.AreEqual(JobStatus.Waiting, state.Waiting[0].Status);
+            Assert.AreEqual(JobAccessMode.Exclusive, state.Waiting[0].AccessMode);
             Assert.AreEqual(JobStatus.Paused, state.Waiting[1].Status);
             Assert.IsFalse(state.Waiting[1].IsPausedByQueue);
 
@@ -270,7 +295,9 @@ public sealed class QueueStateStoreTests
         return directory;
     }
 
-    private static JobRequest CreateRequest(string label)
+    private static JobRequest CreateRequest(
+        string label,
+        JobAccessMode accessMode = JobAccessMode.Exclusive)
     {
         var requestId = Guid.NewGuid();
         return new JobRequest(
@@ -281,6 +308,7 @@ public sealed class QueueStateStoreTests
             DateTimeOffset.UtcNow,
             TimeSpan.FromMinutes(5),
             $"Write-Output '{label}'",
-            RequestLease.GetName(requestId));
+            RequestLease.GetName(requestId),
+            accessMode);
     }
 }

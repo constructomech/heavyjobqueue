@@ -1,8 +1,9 @@
 # Heavy Job Queue
 
-Heavy Job Queue is a per-user Windows tray application that serializes expensive
-developer jobs across terminals and Copilot sessions. It replaces an invisible
-wait with a visible FIFO queue whose waiting jobs can be reordered.
+Heavy Job Queue is a per-user Windows tray application that coordinates expensive
+developer jobs across terminals and Copilot sessions. Shared jobs can overlap,
+while exclusive jobs run alone. It replaces an invisible wait with a visible
+FIFO queue whose waiting jobs can be reordered.
 
 ## How it works
 
@@ -18,8 +19,11 @@ wait with a visible FIFO queue whose waiting jobs can be reordered.
   `%LOCALAPPDATA%\GitHubCopilot\HeavyJobQueue\queue-state.json`.
 - After a broker restart, waiting wrappers reconnect with their stable request
   IDs. Active jobs continue in their caller processes, and their named leases
-  keep automatic grants blocked until they report completion or exit.
+  keep them represented in admission decisions until they report completion or
+  exit.
 - A disconnected request is removed only after its wrapper lease ends.
+- Shared jobs are granted together until the first exclusive waiter. That waiter
+  becomes a FIFO barrier and runs after all active shared jobs finish.
 
 The broker never bypasses the named pipe. A new invocation exits with a clear
 error when the broker is unavailable; a request already accepted by the broker
@@ -33,15 +37,16 @@ waits for it to restart and reclaims its durable entry.
 
 ## Build and test
 
-On machines with the shared heavy-job convention, serialize build and test:
+On machines with the shared heavy-job convention, submit build and test as shared
+jobs and cap each command at four internal workers:
 
 ```powershell
 & "$HOME\.copilot\tools\Invoke-HeavyJob.ps1" "Build Heavy Job Queue" {
-    dotnet build .\HeavyJobQueue.sln --configuration Release
+    dotnet build .\HeavyJobQueue.sln --configuration Release -maxcpucount:4
 }
 
 & "$HOME\.copilot\tools\Invoke-HeavyJob.ps1" "Test Heavy Job Queue" {
-    dotnet test .\HeavyJobQueue.sln --configuration Release --no-build
+    dotnet test .\HeavyJobQueue.sln --configuration Release --no-build -maxcpucount:4
 }
 ```
 
@@ -93,7 +98,7 @@ libraries without reducing the app's steady-state runtime overhead.
 
 ## Use
 
-The invocation contract remains unchanged:
+The wrapper uses shared access by default:
 
 ```powershell
 & "$HOME\.copilot\tools\Invoke-HeavyJob.ps1" "Configure CMake" {
@@ -107,7 +112,7 @@ The optional third argument is the queue wait timeout in minutes and defaults to
 ```powershell
 & "$HOME\.copilot\tools\Invoke-HeavyJob.ps1" "Run benchmarks" {
     .\build\benchmarks.exe
-} -TimeoutMinutes 30
+} -TimeoutMinutes 30 -Exclusive
 ```
 
 While a job waits, the wrapper prints a heartbeat with the elapsed wait, the
@@ -141,11 +146,10 @@ exits the broker. The window shows all active jobs and waiters with label,
 process ID, working directory, and elapsed time. Select a waiting row and use
 **Move up** or **Move down**.
 
-**Run now** is an explicit manual override for times when you judge that the
-machine can handle concurrent work. The selected waiter is granted immediately
-without a confirmation dialog, even when another job is active. You may approve
-multiple overrides. Automatic FIFO grants remain blocked until every
-active and overridden job finishes.
+**Run now** is an explicit ordering override. It grants the selected waiter when
+its access mode is compatible with active jobs: shared jobs may join active shared
+jobs, while exclusive jobs still require an empty active set. Automatic FIFO
+ordering resumes as compatible active jobs finish.
 
 **Pause / resume** moves a selected waiter to or from a paused section at the
 bottom of the queue. New jobs and unpaused waiters pass paused jobs. Resuming
@@ -166,9 +170,10 @@ granted. Held wrappers are told they are paused, so a queued session reports
 why it is waiting instead of appearing to hang.
 
 Two operator overrides still work while the queue is paused: **Run now** grants
-the selected job immediately, and resuming a single waiter exempts just that job
-so it can run under the normal FIFO rules. Pausing an exempted job returns it to
-the queue-wide hold. Jobs you paused individually stay paused through
+the selected job when its access mode is compatible, and resuming a single
+waiter exempts just that job so it can run under the normal FIFO rules. Pausing
+an exempted job returns it to the queue-wide hold. Jobs you paused individually
+stay paused through
 **Resume all**; the `Status` column distinguishes `Queue paused` from `Paused`.
 As with individual pause, time spent globally paused does not count against the
 wrapper's wait timeout, and the paused queue is restored after a broker restart.
@@ -190,7 +195,8 @@ Protocol v2 uses the named pipe `GitHubCopilot.HeavyJobQueue.v2` with
 `PipeOptions.CurrentUserOnly`. Each UTF-8 line is one JSON object. Clients send:
 
 1. `enqueue` with a stable request ID, label, PID, current directory, enqueue
-   timestamp, wait timeout, and per-request named lease.
+   timestamp, wait timeout, per-request named lease, and `shared` or `exclusive`
+   access. Older clients that omit the access mode are treated as exclusive.
 2. `complete` after the caller-process scriptblock finishes, or `cancel` while
    waiting.
 
@@ -217,7 +223,7 @@ broker restart.
 long-running job, which the tray window shows as the current active job. Read
 the wrapper's heartbeat output to confirm it is still queued and see its
 position; lower `-HeartbeatSeconds` for more frequent updates. Use **Run now**
-to grant a waiter immediately when the machine can take the extra load.
+to bypass queue order when the selected job is compatible with active work.
 
 **A session reports that it is paused**: The queue, or that one job, is held by
 the operator. Resume it from the tray window. The waiter is not on a timer by

@@ -95,7 +95,15 @@ public partial class MainWindow : Window
             return;
         }
 
-        _coordinator.RunNow(row.RequestId);
+        if (!_coordinator.RunNow(row.RequestId))
+        {
+            MessageBox.Show(
+                this,
+                "The job is no longer waiting or its access mode conflicts with an active job.",
+                "Job not started",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
     }
 
     private void PauseResume_Click(object sender, RoutedEventArgs eventArgs)
@@ -184,6 +192,7 @@ public partial class MainWindow : Window
         foreach (var job in state.ActiveJobs)
         {
             _activeRows.Add(new ActiveRow(
+                job.AccessMode.ToString(),
                 job.IsManualOverride ? "Override" : "Automatic",
                 job.Label,
                 job.CallerPid,
@@ -200,6 +209,7 @@ public partial class MainWindow : Window
                 job.RequestId,
                 index + 1,
                 DescribeStatus(job),
+                job.AccessMode.ToString(),
                 job.Label,
                 job.CallerPid,
                 job.Cwd,
@@ -324,6 +334,7 @@ public partial class MainWindow : Window
             Guid requestId,
             int position,
             string status,
+            string accessMode,
             string label,
             int pid,
             string cwd,
@@ -335,6 +346,7 @@ public partial class MainWindow : Window
             RequestId = requestId;
             Position = position;
             Status = status;
+            AccessMode = accessMode;
             Label = label;
             Pid = pid;
             Cwd = cwd;
@@ -345,6 +357,7 @@ public partial class MainWindow : Window
         public Guid RequestId { get; }
         public int Position { get; }
         public string Status { get; }
+        public string AccessMode { get; }
         public string Label { get; }
         public int Pid { get; }
         public string Cwd { get; }
@@ -355,7 +368,8 @@ public partial class MainWindow : Window
     private sealed class ActiveRow : TimedRow
     {
         public ActiveRow(
-            string mode,
+            string accessMode,
+            string grantMode,
             string label,
             int pid,
             string cwd,
@@ -363,14 +377,16 @@ public partial class MainWindow : Window
             string command)
             : base(startedAt)
         {
-            Mode = mode;
+            AccessMode = accessMode;
+            GrantMode = grantMode;
             Label = label;
             Pid = pid;
             Cwd = cwd;
             Command = command;
         }
 
-        public string Mode { get; }
+        public string AccessMode { get; }
+        public string GrantMode { get; }
         public string Label { get; }
         public int Pid { get; }
         public string Cwd { get; }

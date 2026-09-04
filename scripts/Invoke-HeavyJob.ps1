@@ -14,7 +14,9 @@ param(
     [int] $PauseTimeoutMinutes = 0,
 
     [ValidateRange(5, 3600)]
-    [int] $HeartbeatSeconds = 60
+    [int] $HeartbeatSeconds = 60,
+
+    [switch] $Exclusive
 )
 
 Set-StrictMode -Version Latest
@@ -301,6 +303,7 @@ try {
         callerPid = $PID
         cwd = (Get-Location).ProviderPath
         command = $Job.ToString()
+        accessMode = if ($Exclusive) { "exclusive" } else { "shared" }
         enqueuedAt = $enqueueTime.ToString("o")
         waitTimeoutSeconds = $TimeoutMinutes * 60
         leaseName = $leaseName

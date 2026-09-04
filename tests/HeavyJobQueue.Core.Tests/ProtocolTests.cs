@@ -18,6 +18,7 @@ public sealed class ProtocolTests
             callerPid = 42,
             cwd = @"C:\src",
             command = "dotnet build",
+            accessMode = "shared",
             enqueuedAt = "2026-07-21T12:00:00Z",
             waitTimeoutSeconds = 60,
             leaseName = RequestLease.GetName(requestId)
@@ -28,6 +29,7 @@ public sealed class ProtocolTests
         Assert.AreEqual("Build", message.Label);
         Assert.AreEqual(42, message.CallerPid);
         Assert.AreEqual("dotnet build", message.Command);
+        Assert.AreEqual(JobAccessMode.Shared, message.AccessMode);
         Assert.AreEqual(TimeSpan.FromMinutes(1), message.WaitTimeout);
     }
 
@@ -58,6 +60,29 @@ public sealed class ProtocolTests
         }));
 
         Assert.IsNull(message.Command);
+        Assert.AreEqual(JobAccessMode.Exclusive, message.AccessMode);
+    }
+
+    [TestMethod]
+    public void RejectsInvalidAccessMode()
+    {
+        var requestId = Guid.NewGuid();
+        var exception = Assert.ThrowsExactly<ProtocolException>(
+            () => Protocol.ParseClientMessage(Protocol.Serialize(new
+            {
+                version = Protocol.Version,
+                type = "enqueue",
+                requestId,
+                label = "Build",
+                callerPid = 42,
+                cwd = @"C:\src",
+                accessMode = "sometimes",
+                enqueuedAt = "2026-07-21T12:00:00Z",
+                waitTimeoutSeconds = 60,
+                leaseName = RequestLease.GetName(requestId)
+            })));
+
+        Assert.AreEqual("invalid_access_mode", exception.Code);
     }
 
     [TestMethod]

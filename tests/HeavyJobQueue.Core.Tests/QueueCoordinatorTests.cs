@@ -26,6 +26,44 @@ public sealed class QueueCoordinatorTests
     }
 
     [TestMethod]
+    public void ActivatesSharedBatchBeforeExclusiveBarrier()
+    {
+        var coordinator = new QueueCoordinator();
+        var first = coordinator.Enqueue(CreateRequest("first", JobAccessMode.Shared));
+        var second = coordinator.Enqueue(CreateRequest("second", JobAccessMode.Shared));
+        var exclusive = coordinator.Enqueue(CreateRequest("benchmark"));
+
+        Assert.IsTrue(coordinator.TryActivateNext(first.Request.RequestId));
+        Assert.AreEqual(second.Request.RequestId, coordinator.PeekNext()!.Request.RequestId);
+        Assert.IsTrue(coordinator.TryActivateNext(second.Request.RequestId));
+        Assert.IsNull(coordinator.PeekNext());
+        Assert.HasCount(2, coordinator.Snapshot().ActiveJobs);
+
+        Assert.IsTrue(coordinator.Complete(first.Request.RequestId, first.Request.LeaseName));
+        Assert.IsNull(coordinator.PeekNext());
+        Assert.IsTrue(coordinator.Complete(second.Request.RequestId, second.Request.LeaseName));
+        Assert.AreEqual(exclusive.Request.RequestId, coordinator.PeekNext()!.Request.RequestId);
+    }
+
+    [TestMethod]
+    public void ExclusiveWaiterBlocksLaterSharedJobs()
+    {
+        var coordinator = new QueueCoordinator();
+        var active = coordinator.Enqueue(CreateRequest("active", JobAccessMode.Shared));
+        var exclusive = coordinator.Enqueue(CreateRequest("benchmark"));
+        var later = coordinator.Enqueue(CreateRequest("later", JobAccessMode.Shared));
+        coordinator.TryActivateNext(active.Request.RequestId);
+
+        Assert.IsNull(coordinator.PeekNext());
+        coordinator.Complete(active.Request.RequestId, active.Request.LeaseName);
+        Assert.IsTrue(coordinator.TryActivateNext(exclusive.Request.RequestId));
+        Assert.IsNull(coordinator.PeekNext());
+
+        coordinator.Complete(exclusive.Request.RequestId, exclusive.Request.LeaseName);
+        Assert.AreEqual(later.Request.RequestId, coordinator.PeekNext()!.Request.RequestId);
+    }
+
+    [TestMethod]
     public void ReordersOnlyWaitingJobs()
     {
         var coordinator = new QueueCoordinator();
@@ -89,9 +127,11 @@ public sealed class QueueCoordinatorTests
     public void RunNowGrantsMultipleOverridesAndBlocksAutomaticQueue()
     {
         var coordinator = new QueueCoordinator();
-        var active = coordinator.Enqueue(CreateRequest("active"));
-        var firstOverride = coordinator.Enqueue(CreateRequest("override-1"));
-        var secondOverride = coordinator.Enqueue(CreateRequest("override-2"));
+        var active = coordinator.Enqueue(CreateRequest("active", JobAccessMode.Shared));
+        var firstOverride = coordinator.Enqueue(
+            CreateRequest("override-1", JobAccessMode.Shared));
+        var secondOverride = coordinator.Enqueue(
+            CreateRequest("override-2", JobAccessMode.Shared));
         var waiting = coordinator.Enqueue(CreateRequest("waiting"));
         coordinator.TryActivateNext(active.Request.RequestId);
 
@@ -118,11 +158,28 @@ public sealed class QueueCoordinatorTests
     }
 
     [TestMethod]
+    public void RunNowPreservesAccessModeCompatibility()
+    {
+        var coordinator = new QueueCoordinator();
+        var shared = coordinator.Enqueue(CreateRequest("shared", JobAccessMode.Shared));
+        var exclusive = coordinator.Enqueue(CreateRequest("benchmark"));
+        var laterShared = coordinator.Enqueue(
+            CreateRequest("later-shared", JobAccessMode.Shared));
+        coordinator.TryActivateNext(shared.Request.RequestId);
+
+        Assert.IsFalse(coordinator.RunNow(exclusive.Request.RequestId));
+        Assert.IsTrue(coordinator.RunNow(laterShared.Request.RequestId));
+        Assert.IsFalse(coordinator.RunNow(exclusive.Request.RequestId));
+        Assert.HasCount(2, coordinator.Snapshot().ActiveJobs);
+    }
+
+    [TestMethod]
     public void RemovingOverrideKeepsQueueBlockedByOtherActiveJobs()
     {
         var coordinator = new QueueCoordinator();
-        var active = coordinator.Enqueue(CreateRequest("active"));
-        var manualOverride = coordinator.Enqueue(CreateRequest("override"));
+        var active = coordinator.Enqueue(CreateRequest("active", JobAccessMode.Shared));
+        var manualOverride = coordinator.Enqueue(
+            CreateRequest("override", JobAccessMode.Shared));
         var waiting = coordinator.Enqueue(CreateRequest("waiting"));
         coordinator.TryActivateNext(active.Request.RequestId);
         coordinator.RunNow(manualOverride.Request.RequestId);
@@ -418,7 +475,9 @@ public sealed class QueueCoordinatorTests
         Assert.AreEqual(resumedDuration, held.TotalPausedDuration);
     }
 
-    private static JobRequest CreateRequest(string label)
+    private static JobRequest CreateRequest(
+        string label,
+        JobAccessMode accessMode = JobAccessMode.Exclusive)
     {
         var requestId = Guid.NewGuid();
         return new JobRequest(
@@ -429,6 +488,7 @@ public sealed class QueueCoordinatorTests
             DateTimeOffset.UtcNow,
             TimeSpan.FromMinutes(5),
             $"Write-Output '{label}'",
-            RequestLease.GetName(requestId));
+            RequestLease.GetName(requestId),
+            accessMode);
     }
 }

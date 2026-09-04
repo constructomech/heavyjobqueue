@@ -68,6 +68,7 @@ public static class Protocol
         var callerPid = GetRequiredInt32(root, "callerPid");
         var cwd = GetRequiredString(root, "cwd");
         var command = GetOptionalString(root, "command");
+        var accessMode = GetAccessMode(root);
         var leaseName = GetRequiredLeaseName(root, requestId);
         var enqueuedAtText = GetRequiredString(root, "enqueuedAt");
         var waitTimeoutSeconds = GetRequiredInt32(root, "waitTimeoutSeconds");
@@ -121,7 +122,8 @@ public static class Protocol
             leaseName,
             null,
             null,
-            null);
+            null,
+            accessMode);
     }
 
     private static ClientMessage ParseComplete(JsonElement root, int version, string type)
@@ -214,6 +216,20 @@ public static class Protocol
         return value.GetString();
     }
 
+    private static JobAccessMode GetAccessMode(JsonElement root)
+    {
+        var accessMode = GetOptionalString(root, "accessMode");
+        return accessMode switch
+        {
+            null => JobAccessMode.Exclusive,
+            "exclusive" => JobAccessMode.Exclusive,
+            "shared" => JobAccessMode.Shared,
+            _ => throw new ProtocolException(
+                "invalid_access_mode",
+                "'accessMode' must be 'shared' or 'exclusive'.")
+        };
+    }
+
     private static int GetRequiredInt32(JsonElement root, string propertyName)
     {
         if (!root.TryGetProperty(propertyName, out var value) ||
@@ -267,7 +283,8 @@ public sealed record ClientMessage(
     string? LeaseName,
     bool? Succeeded,
     int? ExitCode,
-    string? Error);
+    string? Error,
+    JobAccessMode? AccessMode = null);
 
 public sealed class ProtocolException : Exception
 {

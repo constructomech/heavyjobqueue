@@ -165,7 +165,8 @@ public sealed class QueueBroker : IAsyncDisposable
                         first.EnqueuedAt!.Value,
                         first.WaitTimeout!.Value,
                         first.Command,
-                        first.LeaseName!));
+                        first.LeaseName!,
+                        first.AccessMode!.Value));
                 }
                 catch (RequestCompletedException)
                 {
@@ -406,12 +407,6 @@ public sealed class QueueBroker : IAsyncDisposable
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                if (_coordinator.Snapshot().ActiveJobs.Count > 0)
-                {
-                    await _schedulerSignal.WaitAsync(cancellationToken);
-                    continue;
-                }
-
                 var candidate = _coordinator.PeekNext();
                 if (candidate is null)
                 {

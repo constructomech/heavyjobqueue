@@ -99,7 +99,7 @@ public partial class MainWindow : Window
         {
             MessageBox.Show(
                 this,
-                "The job is no longer waiting or its access mode conflicts with an active job.",
+                "The job is no longer waiting or its client disconnected.",
                 "Job not started",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);

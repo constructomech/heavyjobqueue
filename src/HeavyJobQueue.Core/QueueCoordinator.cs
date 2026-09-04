@@ -152,11 +152,6 @@ public sealed class QueueCoordinator
                 registration = _paused[index];
             }
 
-            if (!CanActivateLocked(registration))
-            {
-                return false;
-            }
-
             source.RemoveAt(index);
             var previousActivatedAt = registration.ActivatedAt;
             var wasPaused = registration.IsPaused;

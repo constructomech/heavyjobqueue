@@ -154,10 +154,10 @@ exits the broker. The window shows all active jobs and waiters with label,
 process ID, working directory, and elapsed time. Select a waiting row and use
 **Move up** or **Move down**.
 
-**Run now** is an explicit ordering override. It grants the selected waiter when
-its access mode is compatible with active jobs: shared jobs may join active shared
-jobs, while exclusive jobs still require an empty active set. Automatic FIFO
-ordering resumes as compatible active jobs finish.
+**Run now** is an explicit operator override. It grants the selected waiter
+immediately even when its access mode conflicts with active jobs. You may approve
+multiple overrides. Automatic grants still enforce shared and exclusive access
+and remain blocked until the active set is compatible again.
 
 **Pause / resume** moves a selected waiter to or from a paused section at the
 bottom of the queue. New jobs and unpaused waiters pass paused jobs. Resuming
@@ -178,10 +178,9 @@ granted. Held wrappers are told they are paused, so a queued session reports
 why it is waiting instead of appearing to hang.
 
 Two operator overrides still work while the queue is paused: **Run now** grants
-the selected job when its access mode is compatible, and resuming a single
-waiter exempts just that job so it can run under the normal FIFO rules. Pausing
-an exempted job returns it to the queue-wide hold. Jobs you paused individually
-stay paused through
+the selected job immediately, and resuming a single waiter exempts just that job
+so it can run under the normal FIFO rules. Pausing an exempted job returns it to
+the queue-wide hold. Jobs you paused individually stay paused through
 **Resume all**; the `Status` column distinguishes `Queue paused` from `Paused`.
 As with individual pause, time spent globally paused does not count against the
 wrapper's wait timeout, and the paused queue is restored after a broker restart.
@@ -231,7 +230,7 @@ broker restart.
 long-running job, which the tray window shows as the current active job. Read
 the wrapper's heartbeat output to confirm it is still queued and see its
 position; lower `-HeartbeatSeconds` for more frequent updates. Use **Run now**
-to bypass queue order when the selected job is compatible with active work.
+to override queue order and access compatibility when necessary.
 
 **A session reports that it is paused**: The queue, or that one job, is held by
 the operator. Resume it from the tray window. The waiter is not on a timer by

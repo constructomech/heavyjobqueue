@@ -44,3 +44,7 @@ directly, since a second submission only adds another queue entry.
 If the wrapper reports that the queue operator paused the job, it keeps its place
 and waits until the operator resumes it; it does not cancel itself. Keep waiting
 and report that the queue is paused rather than resubmitting the job.
+
+The tray app's **Run now** command is an explicit operator override. It may grant
+the selected job even when its access mode conflicts with active jobs. Automatic
+scheduling continues to enforce shared and exclusive access.

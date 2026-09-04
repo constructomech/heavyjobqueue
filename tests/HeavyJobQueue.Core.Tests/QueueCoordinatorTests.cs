@@ -158,7 +158,7 @@ public sealed class QueueCoordinatorTests
     }
 
     [TestMethod]
-    public void RunNowPreservesAccessModeCompatibility()
+    public void RunNowOverridesAccessModeCompatibility()
     {
         var coordinator = new QueueCoordinator();
         var shared = coordinator.Enqueue(CreateRequest("shared", JobAccessMode.Shared));
@@ -167,10 +167,12 @@ public sealed class QueueCoordinatorTests
             CreateRequest("later-shared", JobAccessMode.Shared));
         coordinator.TryActivateNext(shared.Request.RequestId);
 
-        Assert.IsFalse(coordinator.RunNow(exclusive.Request.RequestId));
+        Assert.IsTrue(coordinator.RunNow(exclusive.Request.RequestId));
         Assert.IsTrue(coordinator.RunNow(laterShared.Request.RequestId));
-        Assert.IsFalse(coordinator.RunNow(exclusive.Request.RequestId));
-        Assert.HasCount(2, coordinator.Snapshot().ActiveJobs);
+        Assert.HasCount(3, coordinator.Snapshot().ActiveJobs);
+        Assert.AreEqual(
+            2,
+            coordinator.Snapshot().ActiveJobs.Count(job => job.IsManualOverride));
     }
 
     [TestMethod]

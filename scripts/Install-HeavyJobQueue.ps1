@@ -65,6 +65,7 @@ try {
             --configuration Release `
             --runtime win-x64 `
             --self-contained false `
+            -maxcpucount:4 `
             -p:DebugType=None `
             -p:DebugSymbols=false `
             --output $publishDirectory
